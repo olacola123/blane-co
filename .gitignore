@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+**/node_modules/
+__pycache__/
+*.pyc
+*-env/
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
