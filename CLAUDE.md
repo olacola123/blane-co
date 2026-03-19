@@ -1,9 +1,23 @@
 # NM i AI 2026 — Hovedkonkurranse
 
 ## Konkurransen
-- 3 ukjente oppgaver, 19-22. mars 2026
-- Oppgavetyper ukjent — kan være CV, NLP, tabular, RL, optimering, eller noe annet
-- API-basert scoring (se `oppgave-*/api_client.py` som utgangspunkt)
+- 3 oppgaver, 19. mars kl 18:00 → 22. mars kl 15:00 (69 timer)
+- Scoring: gjennomsnitt av 3 normaliserte scores (0-100). Manglende submission = 0.
+- Premier: 400k / 300k / 200k + 100k U23. Krav: Vipps + offentlig repo MIT-lisens.
+- MCP docs-server: `claude mcp add --transport http nmiai https://mcp-docs.ainm.no/mcp`
+
+## Oppgavene
+| # | Oppgave | Type | Scoring | Submit |
+|---|---------|------|---------|--------|
+| 1 | NorgesGruppen Data: Object Detection | ZIP med `run.py` (NVIDIA L4, 300s, ingen nett) | Hybrid mAP@0.5 (70% detect + 30% classify) | app.ainm.no/submit/norgesgruppen-data |
+| 2 | Tripletex: AI Accounting Agent | HTTPS endpoint `/solve` | 0–6.0 (korrekthet × tier × effektivitet) | app.ainm.no/submit/tripletex |
+| 3 | Astar Island: Norse World Prediction | REST API prediksjoner 40×40×6 | KL Divergence 0–100 | app.ainm.no/submit/astar-island |
+
+### Nøkkeldetaljer
+- **Oppgave 1**: 248 bilder, 356 kategorier, COCO-format. YOLOv8 pre-installert. Maks 420 MB ZIP.
+- **Oppgave 2**: 30 oppgavetyper × 56 varianter (7 språk × 8 datasett). Fersk sandbox per sub. API proxy: `https://api.proxy.tripletex.dev`
+- **Oppgave 3**: 50 queries per runde (5 seeds), 15×15 viewport. ALDRI probability 0.0 — bruk min 0.01 floor.
+- **Grocery Bot** er KUN warm-up (teller ikke i hovedscoren)
 
 ## Laget
 - **Ola** (olacola123) — Claude Code
