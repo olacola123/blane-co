@@ -49,3 +49,6 @@ logs/
 # Local Astar Island working copy & history
 oppgave-3/joakim/
 oppgave-3-astar-island/joakim/history/
+oppgave-3-astar-island/joakim/nightbot.log
+oppgave-3-astar-island/joakim/nightbot_state.json
+oppgave-3-astar-island/joakim/nightbot_diagnostics.jsonl
