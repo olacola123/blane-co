@@ -7,8 +7,8 @@
 
 ## Laget
 - **Ola** (olacola123) — Claude Code
-- **Joakim** — Claude Code
-- **Mathea** — Copilot
+- **Joakim** (joakimotto) — Claude Code
+- **Mathea** (matheabrannstorph-commits) — Copilot
 - Delt GitHub-repo. Alle pusher til main.
 
 ## Auto-push

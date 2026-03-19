@@ -2,8 +2,8 @@
 
 ## Lag
 - **Ola** (olacola123)
-- **Joakim** (GitHub TBD)
-- **Mathea** (GitHub TBD)
+- **Joakim** (joakimotto)
+- **Mathea** (matheabrannstorph-commits)
 
 ## Akkurat nå
 - Ola: venter på oppgaveslipp

@@ -22,3 +22,23 @@ env/
 
 # Claude
 .claude/
+
+# ML artifacts
+*.pt
+*.pth
+*.onnx
+*.h5
+*.pkl
+*.joblib
+*.safetensors
+wandb/
+runs/
+checkpoints/
+*.tar.gz
+
+# Data (last ned lokalt, ikke i git)
+data/
+*.csv
+*.parquet
+*.npy
+*.npz
