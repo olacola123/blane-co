@@ -25,8 +25,17 @@ Commit+push dette sammen med koden. Da kan alle se hva som er prøvd, hva som fu
 Før du starter på en oppgave: `git pull` og les oppgavens CLAUDE.md for å unngå å gjenta andres feil.
 
 ## Mappestruktur
-- `oppgave-1/`, `oppgave-2/`, `oppgave-3/` — én mappe per oppgave, all kode her
-- Hver oppgave har sin egen `CLAUDE.md` — oppdater med funn, strategi, hva som er prøvd
+```
+oppgave-X/
+  CLAUDE.md        ← delt eksperiment-logg (alle oppdaterer denne)
+  api_client.py    ← delt API-klient
+  ola/             ← Olas arbeidsområde
+  joakim/          ← Joakims arbeidsområde
+  mathea/          ← Matheas arbeidsområde
+```
+- Jobb i din egen mappe (`oppgave-X/<ditt-navn>/`)
+- Les de andres mapper for inspirasjon — stjel det som funker
+- Oppdater `oppgave-X/CLAUDE.md` med hva du prøvde, score, og om du beholdt/forkastet
 - `STATUS.md` — lagoversikt, scores, hvem jobber på hva
 
 ## Ressurser i repoet
