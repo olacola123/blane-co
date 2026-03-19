@@ -194,7 +194,8 @@ PUT /invoice/{id}/:payment → USE query_params: "paymentDate=YYYY-MM-DD&payment
 
 POST /project: name, number (str), startDate, projectManager ({"id":N}), optionally customer ({"id":N})
 POST /department: name, departmentNumber (int)
-POST /travelExpense: employee ({"id":N}), title, departureDate, returnDate
+POST /travelExpense: employee ({"id":N}), title, travelDetails ({"departureDate":"YYYY-MM-DD","returnDate":"YYYY-MM-DD"})
+  NOTE: dates go inside travelDetails object, NOT as flat fields. departureDate/returnDate do NOT exist as top-level fields.
 POST /contact: firstName, lastName, customer ({"id":N}), optionally email
 
 For DELETE: first GET to find the ID, then DELETE /endpoint/{id}
@@ -207,11 +208,16 @@ Employee with start date: GET /department → POST /employee (with dateOfBirth!)
 Project: GET /department → POST /employee → POST /customer → POST /project
 
 === ERROR RECOVERY ===
-- "email already exists" → GET /employee?email=X&fields=id to find existing
-- "field does not exist" → wrong field name, check cheat sheet
-- "Feltet må fylles ut" → required field missing
-- "Produktnummeret er i bruk" → use different number
-- NEVER retry with same data that caused an error"""
+- "email already exists" → GET /employee?email=X&fields=id,firstName,lastName to find existing ID. Use that ID.
+- "field does not exist" → wrong field name, check cheat sheet above
+- "Feltet må fylles ut" → required field missing, add it
+- "Produktnummeret er i bruk" → use a different product number
+- "Faktura kan ikke opprettes" → likely missing bank account or orderlines. Ensure order has orderlines before creating invoice.
+- "projectManager.id Oppgitt ansatt..." → the employee needs the correct access rights. Create employee with userType="STANDARD".
+- "Verdien er ikke av korrekt type" for userType → ONLY use "STANDARD". Never "ADMINISTRATOR", "ADMIN", etc.
+- "Numm..." for departmentNumber → each department must have a UNIQUE number. Use incrementing numbers (1, 2, 3...).
+- NEVER retry with the exact same data that caused an error — always change something.
+- GET /invoice REQUIRES invoiceDateFrom and invoiceDateTo as query params."""
 
 
 # === ENDPOINTS ===
