@@ -1,4 +1,4 @@
-# Olas oppgave
+# Oppgave 2
 
 ## Oppgave
 (Fyll inn når oppgaven er kjent)
@@ -7,10 +7,10 @@
 (Fra oppgaveteksten)
 
 ## Hva vi har prøvd
-(Tilnærming → resultat → beholdt/forkastet)
+(Tilnærming -> resultat -> beholdt/forkastet)
 
 ## Beste strategi så langt
-(Beskriv med egne ord hva koden gjør)
+(Beskriv kort hva koden gjør)
 
 ## Funn
-(Ting du har lært som kan hjelpe de andre)
+(Ting som kan hjelpe de andre oppgavene)
