@@ -1,2 +1,4 @@
 # Append-only score logs: auto-merge by keeping all lines from both sides
-oppgave-*/scores.jsonl merge=union
+oppgave-1-object-detection/scores.jsonl merge=union
+oppgave-2-tripletex-agent/scores.jsonl merge=union
+oppgave-3-astar-island/scores.jsonl merge=union

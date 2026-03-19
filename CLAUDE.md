@@ -27,14 +27,21 @@
 
 ## Før du starter på en oppgave (VIKTIG)
 1. `git pull`
-2. Les `oppgave-X/OPPGAVE.md` — oppgavebeskrivelse og constraints
-3. Les ALLE personlogger: `oppgave-X/ola/LOG.md`, `joakim/LOG.md`, `mathea/LOG.md`
-4. Se `oppgave-X/scores.jsonl` — hvem har best score?
+2. Les `oppgave-N-navn/OPPGAVE.md` — oppgavebeskrivelse og constraints
+3. Les ALLE personlogger: `oppgave-N-navn/ola/LOG.md`, `joakim/LOG.md`, `mathea/LOG.md`
+4. Se `oppgave-N-navn/scores.jsonl` — hvem har best score?
 5. Sjekk den beste personens kode for inspirasjon
+
+### Oppgavemapper
+- `oppgave-1-object-detection/` — NorgesGruppen Object Detection
+- `oppgave-2-tripletex-agent/` — Tripletex AI Accounting Agent
+- `oppgave-3-astar-island/` — Astar Island Norse World Prediction
 
 ## Mappestruktur
 ```
-oppgave-X/
+oppgave-1-object-detection/
+oppgave-2-tripletex-agent/
+oppgave-3-astar-island/
   OPPGAVE.md       ← oppgavebeskrivelse (skrives én gang)
   api_client.py    ← delt API-klient
   scores.jsonl     ← scorelog (append-only, auto-merges)
@@ -72,7 +79,7 @@ python3 scripts/scoreboard.py
 ```
 
 ## Eksperiment-logg
-Etter hvert eksperiment — oppdater din `oppgave-X/<ditt-navn>/LOG.md`:
+Etter hvert eksperiment — oppdater din `oppgave-N-navn/<ditt-navn>/LOG.md`:
 - Legg til rad i "Hva jeg har prøvd"-tabellen
 - Oppdater "Nåværende strategi" og "Neste steg"
 - Legg til "Funn" hvis noe kan hjelpe andre oppgaver
@@ -81,7 +88,7 @@ Bruk `bash scripts/submit.sh` for å logge score + commit + push i ett.
 
 ## Ressurser i repoet
 - `templates/` — ferdiglagde Python-templates (rl_agent, rag_pipeline, classifier, segmentation, optimizer, websocket_bot, api_client)
-- `oppgave-*/api_client.py` — API-klient klar til bruk i hver oppgave
+- `oppgave-*/api_client.py` — API-klient klar til bruk i hver oppgavemappe
 - `setup.sh` — installer Python-miljø med alle ML-pakker
 
 ## Olas lokale ressurser (kun tilgjengelig på Olas maskin)

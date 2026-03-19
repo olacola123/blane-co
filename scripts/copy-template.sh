@@ -18,8 +18,16 @@ if [ -z "$TEMPLATE" ] || [ -z "$OPPGAVE" ] || [ -z "$PERSON" ]; then
     exit 1
 fi
 
+# Map task number to directory name
+case "$OPPGAVE" in
+    1) OPPGAVE_DIR="oppgave-1-object-detection" ;;
+    2) OPPGAVE_DIR="oppgave-2-tripletex-agent" ;;
+    3) OPPGAVE_DIR="oppgave-3-astar-island" ;;
+    *) echo "FEIL: Ukjent oppgave '$OPPGAVE'. Bruk 1, 2 eller 3."; exit 1 ;;
+esac
+
 SRC="templates/${TEMPLATE}.py"
-DST="oppgave-${OPPGAVE}/${PERSON}/solution.py"
+DST="${OPPGAVE_DIR}/${PERSON}/solution.py"
 
 if [ ! -f "$SRC" ]; then
     echo "FEIL: Template '$SRC' finnes ikke"

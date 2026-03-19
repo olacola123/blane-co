@@ -10,9 +10,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 
+# Map task numbers to directory names
+TASK_DIRS = {
+    1: "oppgave-1-object-detection",
+    2: "oppgave-2-tripletex-agent",
+    3: "oppgave-3-astar-island",
+}
+
+TASK_NAMES = {
+    1: "Object Detection",
+    2: "Tripletex Agent",
+    3: "Astar Island",
+}
+
 
 def read_scores(task_num: int) -> list[dict]:
-    path = ROOT / f"oppgave-{task_num}" / "scores.jsonl"
+    path = ROOT / TASK_DIRS[task_num] / "scores.jsonl"
     if not path.exists():
         return []
     scores = []
@@ -41,7 +54,7 @@ def generate_status() -> str:
 
     for task in [1, 2, 3]:
         scores = read_scores(task)
-        lines.append(f"## Oppgave {task}")
+        lines.append(f"## Oppgave {task} — {TASK_NAMES[task]}")
 
         if not scores:
             lines.append("Ingen scores ennå.\n")
@@ -73,10 +86,10 @@ def generate_status() -> str:
         if task in best_per_task:
             b = best_per_task[task]
             lines.append(
-                f"| {task} | {b['score']} | {b['person']} | {b.get('approach', '')} |"
+                f"| {task} — {TASK_NAMES[task]} | {b['score']} | {b['person']} | {b.get('approach', '')} |"
             )
         else:
-            lines.append(f"| {task} | — | — | — |")
+            lines.append(f"| {task} — {TASK_NAMES[task]} | — | — | — |")
 
     lines.append("")
     return "\n".join(lines)

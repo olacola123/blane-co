@@ -25,7 +25,7 @@ bash scripts/sync.sh
 bash scripts/copy-template.sh classifier 1 ola
 
 # Jobb i din mappe
-cd oppgave-1/<ditt-navn>/
+cd oppgave-1-object-detection/<ditt-navn>/
 
 # Når du har en score — logger, backuper, committer og pusher automatisk:
 bash scripts/submit.sh 1 ola 72.3 "XGBoost ensemble"
@@ -34,8 +34,10 @@ bash scripts/submit.sh 1 ola 72.3 "XGBoost ensemble"
 ## Struktur
 
 ```
-oppgave-X/
-  OPPGAVE.md       ← oppgavebeskrivelse (fylles inn når oppgaven slippes)
+oppgave-1-object-detection/
+oppgave-2-tripletex-agent/
+oppgave-3-astar-island/
+  OPPGAVE.md       ← oppgavebeskrivelse
   api_client.py    ← delt API-klient
   scores.jsonl     ← alle scores (append-only, ingen merge conflicts)
   ola/             ← Olas kode + LOG.md
@@ -50,6 +52,6 @@ STATUS.md          ← auto-generert scoreboard
 
 - **Les andres `LOG.md` før du starter** — unngå å gjenta feil
 - **Submit baseline FØRST** — score på tavla > perfekt plan
-- Commit-melding: `oppgave-X: score Y, kort beskrivelse`
+- Commit-melding: `oppgave-N-navn: score Y, kort beskrivelse`
 - Secrets i miljøvariabler, ALDRI i kode
 - Stjel det som funker fra andres mapper
