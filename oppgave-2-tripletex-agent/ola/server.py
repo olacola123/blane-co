@@ -187,6 +187,7 @@ POST /product:
 POST /order: customer ({"id":N}), deliveryDate, orderDate
 POST /order/orderline: order ({"id":N}), product ({"id":N}), count (float)
 POST /invoice: invoiceDate, invoiceDueDate, orders ([{"id":N}])
+  NOTE: Invoice requires orderlines on the order first. Create order, then orderline, then invoice.
 
 PUT /invoice/{id}/:payment → USE query_params: "paymentDate=YYYY-MM-DD&paymentTypeId=ID&paidAmount=TOTAL_WITH_VAT"
   First GET /invoice/paymentType?fields=id,description&count=5 to find paymentTypeId

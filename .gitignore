@@ -42,3 +42,6 @@ data/
 *.parquet
 *.npy
 *.npz
+
+# Logs
+logs/
