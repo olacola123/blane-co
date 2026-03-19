@@ -11,32 +11,59 @@
 - **Mathea** (matheabrannstorph-commits) — Copilot
 - Delt GitHub-repo. Alle pusher til main.
 
-## Auto-push
-Commit og push automatisk etter hver score-forbedring eller vesentlig endring.
-Commit-melding: `oppgave-X: score Y, kort beskrivelse`
-
-## Eksperiment-logg (VIKTIG)
-Etter hvert eksperiment — oppdater `oppgave-X/CLAUDE.md`:
-- Legg til i "Hva vi har prøvd": `tilnærming -> score -> beholdt/forkastet`
-- Oppdater "Beste strategi" hvis ny best
-- Legg til i "Funn" hvis noe kan hjelpe andre oppgaver
-Commit+push dette sammen med koden. Da kan alle se hva som er prøvd, hva som funket, og hva som feilet — uten å spørre.
-
-Før du starter på en oppgave: `git pull` og les oppgavens CLAUDE.md for å unngå å gjenta andres feil.
+## Før du starter på en oppgave (VIKTIG)
+1. `git pull`
+2. Les `oppgave-X/OPPGAVE.md` — oppgavebeskrivelse og constraints
+3. Les ALLE personlogger: `oppgave-X/ola/LOG.md`, `joakim/LOG.md`, `mathea/LOG.md`
+4. Se `oppgave-X/scores.jsonl` — hvem har best score?
+5. Sjekk den beste personens kode for inspirasjon
 
 ## Mappestruktur
 ```
 oppgave-X/
-  CLAUDE.md        ← delt eksperiment-logg (alle oppdaterer denne)
+  OPPGAVE.md       ← oppgavebeskrivelse (skrives én gang)
   api_client.py    ← delt API-klient
-  ola/             ← Olas arbeidsområde
-  joakim/          ← Joakims arbeidsområde
-  mathea/          ← Matheas arbeidsområde
+  scores.jsonl     ← scorelog (append-only, auto-merges)
+  ola/
+    LOG.md          ← Olas eksperiment-logg
+    solution.py     ← Olas løsning
+  joakim/
+    LOG.md          ← Joakims eksperiment-logg
+    solution.py
+  mathea/
+    LOG.md          ← Matheas eksperiment-logg
+    solution.py
+scripts/
+  submit.sh        ← submit + logg + backup + commit + push
+  scoreboard.py    ← genererer STATUS.md fra scores.jsonl
+  copy-template.sh ← kopier template til din mappe
+  sync.sh          ← hent andres arbeid (git pull)
+templates/         ← ferdiglagde ML-templates
+STATUS.md          ← auto-generert scoreboard
 ```
-- Jobb i din egen mappe (`oppgave-X/<ditt-navn>/`)
-- Les de andres mapper for inspirasjon — stjel det som funker
-- Oppdater `oppgave-X/CLAUDE.md` med hva du prøvde, score, og om du beholdt/forkastet
-- `STATUS.md` — lagoversikt, scores, hvem jobber på hva
+
+## Scripts
+```bash
+# Hent andres arbeid
+bash scripts/sync.sh
+
+# Kopier en template som utgangspunkt
+bash scripts/copy-template.sh classifier 1 ola
+
+# Logg en score (backup + commit + push automatisk)
+bash scripts/submit.sh 1 ola 72.3 "XGBoost ensemble"
+
+# Oppdater scoreboard manuelt
+python3 scripts/scoreboard.py
+```
+
+## Eksperiment-logg
+Etter hvert eksperiment — oppdater din `oppgave-X/<ditt-navn>/LOG.md`:
+- Legg til rad i "Hva jeg har prøvd"-tabellen
+- Oppdater "Nåværende strategi" og "Neste steg"
+- Legg til "Funn" hvis noe kan hjelpe andre oppgaver
+
+Bruk `bash scripts/submit.sh` for å logge score + commit + push i ett.
 
 ## Ressurser i repoet
 - `templates/` — ferdiglagde Python-templates (rl_agent, rag_pipeline, classifier, segmentation, optimizer, websocket_bot, api_client)
@@ -54,14 +81,13 @@ Disse ligger i vaulten, ikke i repoet. Les ved behov:
 - Jobb autonomt — ikke spør Ola om tekniske valg, bare vis kort resultat
 - Submit baseline FØRST, forbedre etterpå. Score på tavla > perfekt plan.
 - Test inkrementelt: maks 2-3 endringer mellom submissions
-- `cp solution.py solution.py.best-X` etter hver forbedring — aldri mist beste versjon
 - Secrets i miljøvariabler: `export API_KEY='...'`
 
 ## Overførbare lærdommer fra warm-up
 1. **Enkelhet > kompleksitet** — enkel tilnærming slo alle avanserte varianter
 2. **Automatisert søk > manuell tuning** — 1200 auto-iterasjoner fant det 12 manuelle ikke fant
 3. **Submit tidlig** — ha noe på leaderboard før du optimerer
-4. **Backups alltid** — navngi med score: `solution.py.best-85`
+4. **Backups alltid** — submit.sh gjør dette automatisk
 5. **Heuristikk har tak** — når score platåer etter 3+ forsøk, bytt tilnærming helt
 6. **Verifiser antakelser empirisk** — les oppgaven, men TEST med faktiske kjøringer
 

@@ -1,0 +1,2 @@
+# Append-only score logs: auto-merge by keeping all lines from both sides
+oppgave-*/scores.jsonl merge=union

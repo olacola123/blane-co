@@ -1,7 +1,6 @@
 # NM i AI 2026 — Hovedkonkurranse
 
-**Lag:** Ola, Joakim, Mathea
-**Dato:** 19-22. mars 2026
+**Lag:** Ola, Joakim, Mathea | **Dato:** 19-22. mars 2026
 
 ## Quickstart
 
@@ -10,42 +9,47 @@
 git clone https://github.com/olacola123/nmiai-2026.git
 cd nmiai-2026
 bash setup.sh
-
-# 2. Aktiver miljø
 source env/bin/activate
 
-# 3. Sett API-nøkkel
+# 2. Sett API-nøkkel
 export API_KEY='din-nøkkel-her'
+```
 
-# 4. Jobb i din mappe
+## Arbeidsflyt
+
+```bash
+# Hent andres arbeid
+bash scripts/sync.sh
+
+# Kopier template som utgangspunkt
+bash scripts/copy-template.sh classifier 1 ola
+
+# Jobb i din mappe
 cd oppgave-1/<ditt-navn>/
+
+# Når du har en score — logger, backuper, committer og pusher automatisk:
+bash scripts/submit.sh 1 ola 72.3 "XGBoost ensemble"
 ```
 
 ## Struktur
 
 ```
 oppgave-X/
-  CLAUDE.md        ← delt eksperiment-logg (ALLE oppdaterer denne)
+  OPPGAVE.md       ← oppgavebeskrivelse (fylles inn når oppgaven slippes)
   api_client.py    ← delt API-klient
-  ola/             ← Olas kode
-  joakim/          ← Joakims kode
-  mathea/          ← Matheas kode
+  scores.jsonl     ← alle scores (append-only, ingen merge conflicts)
+  ola/             ← Olas kode + LOG.md
+  joakim/          ← Joakims kode + LOG.md
+  mathea/          ← Matheas kode + LOG.md
+scripts/           ← submit.sh, scoreboard.py, copy-template.sh, sync.sh
 templates/         ← ferdiglagde ML-templates
-STATUS.md          ← scores og hvem jobber på hva
+STATUS.md          ← auto-generert scoreboard
 ```
-
-## Arbeidsflyt
-
-1. `git pull` før du starter
-2. Les `oppgave-X/CLAUDE.md` — se hva andre har prøvd
-3. Jobb i `oppgave-X/<ditt-navn>/`
-4. Submit baseline FØRST, forbedre etterpå
-5. Oppdater `oppgave-X/CLAUDE.md` med resultat
-6. Commit + push etter hver score-forbedring
 
 ## Regler
 
+- **Les andres `LOG.md` før du starter** — unngå å gjenta feil
+- **Submit baseline FØRST** — score på tavla > perfekt plan
 - Commit-melding: `oppgave-X: score Y, kort beskrivelse`
-- Backup beste løsning: `cp solution.py solution.py.best-85`
 - Secrets i miljøvariabler, ALDRI i kode
-- Les andres mapper for inspirasjon — stjel det som funker
+- Stjel det som funker fra andres mapper
