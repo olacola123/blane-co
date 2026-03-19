@@ -1,81 +1,226 @@
 # Oppgave 3: Astar Island — Norse World Prediction
 
-## Beskrivelse
-Observer en black-box norrøn sivilisasjonssimulator gjennom et begrenset viewport og prediker terrengfordelingen over et 40x40 kart etter 50 simulerte år.
+## Hva er dette?
+Observer en black-box norrøn sivilisasjonssimulator gjennom et begrenset viewport, og prediker sannsynlighetsfordelinger for sluttilstanden over et 40×40 kart.
 
-## Kjernen
-Simuleringen er stokastisk — identiske startbetingelser gir ulike utfall. Du mottar:
-- **50 totale queries** per runde, delt på 5 seeds
-- **15x15 maks viewport** per query (avdekker kun et lite vindu av fullt kart)
-- Oppgave: Bygg sannsynlighetsfordelinger for terrengklasser over hele kartet
+## Hvordan det fungerer
+1. Runde starter med fast kart, skjulte parametere, 5 tilfeldige seeds
+2. Kall `POST /simulate` med viewport-koordinater (maks 15×15 av 40×40 kart)
+3. **50 queries totalt** per runde, delt på tvers av alle 5 seeds
+4. Analyser observasjoner for å lære de skjulte reglene
+5. Submit H×W×6 sannsynlighetstensor per seed
+6. Scores via entropy-vektet KL divergence
 
-## Terrengtyper → 6 prediksjonsklasser
-| Terrengtype | Klasse |
-|-------------|--------|
-| Empty/Ocean/Plains | 0 |
-| Settlements | 1 |
-| Ports | 2 |
-| Ruins | 3 |
-| Forests | 4 |
-| Mountains | 5 |
+## Verdenen — 8 terrengtyper → 6 prediksjonsklasser
 
-## Simuleringsmekanikk
-- 8 terrengtyper mapper til 6 prediksjonsklasser
-- 50-års livssyklus med vekst, konflikt, handel, vinter, og miljøfaser
-- Stokastiske elementer: settlementutvidelse, raidingmønstre, faksjonsskifter, kollaps/recovery
+| Intern kode | Terreng | Klasse | Beskrivelse |
+|-------------|---------|--------|-------------|
+| 10 | Ocean | 0 (Empty) | Upasserbart vann, kartkanter |
+| 11 | Plains | 0 (Empty) | Flatt land, kan bygges på |
+| 0 | Empty | 0 | Generisk tomt |
+| 1 | Settlement | 1 | Aktiv norrøn bosetning |
+| 2 | Port | 2 | Kystbosetning med havn |
+| 3 | Ruin | 3 | Kollapset bosetning |
+| 4 | Forest | 4 | Gir mat til naboceller |
+| 5 | Mountain | 5 | Upasserbart, statisk |
 
-## API-endepunkter
-**Base URL**: `https://api.ainm.no/astar-island/`
+## Kartgenerering (fra map seed, synlig for deg)
+- Havkanter, fjorder skjærer innover, fjellkjeder via random walks
+- Skogflekker, initielle bosetninger plassert på land med avstand mellom
+
+## Simuleringslivssyklus (50 år, hver med faser)
+
+### 1. Growth (Vekst)
+- Matproduksjon, befolkningsvekst, havneutvikling, ekspansjon
+
+### 2. Conflict (Konflikt)
+- Raids, langskip utvider rekkevidde, desperate bosetninger raider mer
+
+### 3. Trade (Handel)
+- Havner handler hvis ikke i krig, genererer rikdom + mat, teknologidiffusjon
+
+### 4. Winter (Vinter)
+- Varierende alvorlighet, mattap, kollaps fra sult/raids/vinter → Ruins
+
+### 5. Environment (Miljø)
+- Ruiner gjenerobres av bosetninger eller skog, kystruiner → havner
+
+## Bosetningsegenskaper
+`position`, `population`, `food`, `wealth`, `defense`, `tech_level`, `port_status`, `longship_ownership`, `faction (owner_id)`
+
+## API
+
+**Base URL:** `https://api.ainm.no/astar-island/`
+**Auth:** Cookie `access_token` JWT eller Bearer token (fra app.ainm.no login)
+
+### Endepunkter
 
 | Endepunkt | Metode | Beskrivelse |
 |-----------|--------|-------------|
-| `/astar-island/rounds` | GET | List aktive runder |
-| `/astar-island/rounds/{round_id}` | GET | Hent initial kart-state for alle seeds |
-| `/astar-island/simulate` | POST | Kjør én stokastisk query med viewport-koordinater |
-| `/astar-island/submit` | POST | Submit W×H×6 sannsynlighetstensor per seed |
-| `/astar-island/budget` | GET | Sjekk gjenværende query-budsjett |
+| `/rounds` | GET | List alle runder |
+| `/rounds/{round_id}` | GET | Rundedetaljer + initial states for alle seeds |
+| `/budget` | GET | Query-budsjett (maks 50) |
+| `/simulate` | POST | Kjør observasjon (koster 1 query) |
+| `/submit` | POST | Submit prediksjonstensor |
+| `/my-rounds` | GET | Dine scores, rank, budsjett |
+| `/my-predictions/{round_id}` | GET | Dine prediksjoner med argmax/confidence |
+| `/analysis/{round_id}/{seed_index}` | GET | Post-runde ground truth sammenligning |
+| `/leaderboard` | GET | Offentlig leaderboard |
+
+### POST /simulate — Request
+```json
+{
+  "round_id": "uuid",
+  "seed_index": 0,
+  "viewport_x": 0,
+  "viewport_y": 0,
+  "viewport_w": 15,
+  "viewport_h": 15
+}
+```
+- `seed_index`: 0–4
+- `viewport_w` og `viewport_h`: 5–15
+
+### POST /simulate — Response
+```json
+{
+  "grid": [[...]],
+  "settlements": [
+    {
+      "x": 0, "y": 0,
+      "population": 2.8, "food": 0.4, "wealth": 0.7,
+      "defense": 0.6, "has_port": true, "alive": true,
+      "owner_id": 3
+    }
+  ],
+  "viewport": {"x": 0, "y": 0, "w": 15, "h": 15},
+  "width": 40,
+  "height": 40,
+  "queries_used": 24,
+  "queries_max": 50
+}
+```
+
+### POST /submit — Request
+```json
+{
+  "round_id": "uuid",
+  "seed_index": 0,
+  "prediction": [[[p0, p1, p2, p3, p4, p5], ...], ...]
+}
+```
+- H×W×6 tensor, hver celle summerer til 1.0 (±0.01 toleranse)
+- Resubmitting overskriver tidligere prediksjon for den seeden
+
+### GET /rounds/{round_id} — initial_states
+Hver seed inneholder:
+- `grid`: H×W terrengkoder
+- `settlements`: `[{x, y, has_port, alive}]`
+- **NB:** Kun posisjon + port eksponert, ikke interne stats
+
+### Rate Limits
+- `/simulate`: 5 req/sek per lag
+- `/submit`: 2 req/sek per lag
 
 ## Scoring: Entropy-Weighted KL Divergence
 
-**Formel**: `Score = 100 × exp(-KL_entropy_weighted)`
+### Formler
+```
+KL(p||q) = Σ pᵢ × log(pᵢ / qᵢ)
+entropy(cell) = -Σ pᵢ × log(pᵢ)
+weighted_kl = Σ entropy(cell) × KL(truth, pred) / Σ entropy(cell)
+score = max(0, min(100, 100 × exp(-3 × weighted_kl)))
+```
 
-### Ground Truth
-Arrangørene pre-beregner sannsynlighetsfordelinger ved å kjøre simuleringer hundrevis av ganger med sanne skjulte parametre.
+### Viktige detaljer
+- Kun **dynamiske celler** teller (statiske ekskludert)
+- Celler med høyere entropi vektes mer
+- **100 = perfekt**, **0 = verst**
+- **Per-runde score:** gjennomsnitt av 5 seeds. Manglende seed = 0.
+- **Leaderboard:** beste `round_score × round_weight` på tvers av alle runder
+- **Hot streak:** gjennomsnitt av siste 3 runder
 
-### KL Divergence (per celle)
-`KL(p||q) = Σ pᵢ × log(pᵢ / qᵢ)`
+### KRITISK: Aldri assign probability 0.0!
+Hvis ground truth har non-zero men prediksjon er 0 → KL divergence → ∞ → ødelegger cellens score.
 
-### Entropy-vekting
-- Statiske celler (hav alltid hav, fjell endres aldri) bidrar null
-- Kun dynamiske celler teller, vektet etter entropi
-- Celler med usikre utfall har høyere vekt
+**Floor på 0.01, renormaliser:**
+```python
+prediction = np.maximum(prediction, 0.01)
+prediction = prediction / prediction.sum(axis=-1, keepdims=True)
+```
 
-### KRITISK: Minimum-sannsynlighet
-**ALDRI assign probability 0.0 til noen klasse!**
-Hvis ground truth har non-zero men prediksjon er 0 → KL divergence → uendelig → ødelegger den cellens score.
-**Anbefalt**: Sett minimum floor på 0.01 per klasse, deretter renormaliser.
+## Rundetiming
+- `prediction_window_minutes` typisk 165 (2t 45min)
+- Status-flyt: `pending → active → scoring → completed`
 
-### Score-range: 0 (verst) til 100 (perfekt)
+## Nøkkelkonsepter
+- **Map seed**: bestemmer terreng (fast, synlig for deg)
+- **Sim seed**: tilfeldig per query (ulikt hver gang)
+- **Skjulte parametere**: styrer verdensoppførsel (like for alle seeds i en runde)
+- **Uniform baseline** scorer typisk 1–5
 
-## Submission-format
-3D array `prediction[y][x][class]`:
-- Ytre dimensjon: H rader (høyde)
-- Midtre dimensjon: W kolonner (bredde)
-- Indre dimensjon: 6 klassesannsynligheter (MÅ summere til 1.0 ± 0.01 toleranse)
+## Quickstart
 
-Alle sannsynligheter non-negative. Resubmission overskriver tidligere prediksjoner for samme seed.
+```python
+import requests
+import numpy as np
 
-## Constraints
-- **50 queries totalt** per runde på tvers av alle 5 seeds
-- **15x15 maks viewport** per query
-- **40x40 fullt kartstørrelse**
-- Må submitte prediksjoner for alle seeds (usubmittede seeds = score 0)
-- Prediksjonsvindu typisk 2 timer 45 minutter etter runde starter
+# Auth — hent token fra app.ainm.no
+TOKEN = "din_token_her"
+BASE = "https://api.ainm.no/astar-island"
+headers = {"Authorization": f"Bearer {TOKEN}"}
 
-## Strategi-tips
-- Identifiser skjulte parametre som styrer verdensoppførsel via viewport-observasjoner
-- Bygg probabilistiske modeller som ekstrapolerer begrensede observasjoner til fullt kart
-- Balanser query-allokering mellom seeds
-- Regn med stokastisk varians i simuleringer
-- Start med uniform prior (1/6 per klasse) som baseline
-- Bruk 10 queries per seed (50/5)
+# 1. Hent aktive runder
+rounds = requests.get(f"{BASE}/rounds", headers=headers).json()
+round_id = rounds[0]["id"]
+
+# 2. Hent rundedetaljer med initial states
+round_info = requests.get(f"{BASE}/rounds/{round_id}", headers=headers).json()
+height = round_info["height"]  # 40
+width = round_info["width"]    # 40
+
+# 3. Observer med viewport
+obs = requests.post(f"{BASE}/simulate", headers=headers, json={
+    "round_id": round_id,
+    "seed_index": 0,
+    "viewport_x": 0,
+    "viewport_y": 0,
+    "viewport_w": 15,
+    "viewport_h": 15
+}).json()
+
+print(f"Queries brukt: {obs['queries_used']}/{obs['queries_max']}")
+print(f"Grid shape: {len(obs['grid'])}x{len(obs['grid'][0])}")
+print(f"Settlements: {len(obs['settlements'])}")
+
+# 4. Bygg prediksjon (uniform baseline)
+prediction = np.ones((height, width, 6)) / 6.0
+
+# Floor — ALDRI 0.0
+prediction = np.maximum(prediction, 0.01)
+prediction = prediction / prediction.sum(axis=-1, keepdims=True)
+
+# 5. Submit
+resp = requests.post(f"{BASE}/submit", headers=headers, json={
+    "round_id": round_id,
+    "seed_index": 0,
+    "prediction": prediction.tolist()
+})
+print(f"Submit status: {resp.status_code}")
+
+# 6. Sjekk score
+my_rounds = requests.get(f"{BASE}/my-rounds", headers=headers).json()
+print(my_rounds)
+```
+
+## Constraints oppsummert
+| Constraint | Verdi |
+|-----------|-------|
+| Kart | 40×40 |
+| Maks viewport | 15×15 |
+| Queries per runde | 50 (delt på 5 seeds) |
+| Seeds per runde | 5 |
+| Prediksjonsklasser | 6 |
+| Prediksjonsvindu | ~2t 45min |
+| Maks ZIP | N/A (API-basert) |
+| Min sannsynlighet | 0.01 (ALDRI 0.0) |

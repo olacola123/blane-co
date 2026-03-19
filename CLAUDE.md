@@ -15,9 +15,11 @@
 
 ### Nøkkeldetaljer
 - **Oppgave 1**: 248 bilder, 356 kategorier, COCO-format. YOLOv8 pre-installert. Maks 420 MB ZIP.
-- **Oppgave 2**: 30 oppgavetyper × 56 varianter (7 språk × 8 datasett). Fersk sandbox per sub. API proxy: `https://api.proxy.tripletex.dev`
+- **Oppgave 2**: 30 oppgavetyper × 56 varianter (7 språk × 8 datasett). Fersk sandbox per sub. API proxy: `https://tx-proxy.ainm.no/v2`. Sandbox: `https://kkpqfuj-amager.tripletex.dev/v2`. Tier 2 fredag, Tier 3 lørdag.
 - **Oppgave 3**: 50 queries per runde (5 seeds), 15×15 viewport. ALDRI probability 0.0 — bruk min 0.01 floor.
-- **Grocery Bot** er KUN warm-up (teller ikke i hovedscoren)
+- **Oppgave 1**: 3 submissions/dag, 2 in-flight. Leaderboard: public test → final med privat test.
+- **Oppgave 2**: Verified: 3 concurrent, 5/task/dag. Unverified: 1 concurrent, 2/task/dag.
+- **Oppgave 3**: 50 queries/runde, runder ~2t45m. Poller /rounds for nye runder. Trenger nattbot.
 
 ## Laget
 - **Ola** (olacola123) — Claude Code
