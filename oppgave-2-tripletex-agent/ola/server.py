@@ -23,7 +23,7 @@ log = logging.getLogger("agent")
 
 app = FastAPI()
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyC5BmlT5_sMtRgHUsrmb0MwOfEr2UCq6xI")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
@@ -56,8 +56,8 @@ class TripletexClient:
             elif method == "POST":
                 resp = self._request("POST", endpoint, json=data or {}, params=params)
             elif method == "PUT":
-                # PUT with :action (e.g. /:payment) uses query params, not body
-                if "/:payment" in endpoint or ":approve" in endpoint or ":deliver" in endpoint:
+                # PUT with :action (e.g. /:payment, /:approve, /:deliver, /:send) uses query params, not body
+                if re.search(r'/:', endpoint):
                     # Merge body fields into params for action endpoints
                     action_params = dict(params or {})
                     if data:
@@ -93,8 +93,8 @@ RULES:
 === API CHEAT SHEET (exact field names from Tripletex API) ===
 
 POST /employee:
-  REQUIRED: firstName(str), lastName(str), userType("STANDARD"|"ADMINISTRATOR"), department({"id":N})
-  OPTIONAL: email(str), dateOfBirth("YYYY-MM-DD"), phoneNumberMobile(str), phoneNumberHome(str), phoneNumberWork(str), bankAccountNumber(str), nationalIdentityNumber(str), comments(str), address({"addressLine1":"..","postalCode":"..","city":".."})
+  REQUIRED: firstName(str), lastName(str), email(str), userType("STANDARD"|"ADMINISTRATOR"), department({"id":N})
+  OPTIONAL: dateOfBirth("YYYY-MM-DD"), phoneNumberMobile(str), phoneNumberHome(str), phoneNumberWork(str), bankAccountNumber(str), nationalIdentityNumber(str), comments(str), address({"addressLine1":"..","postalCode":"..","city":".."})
   ALWAYS get department first: GET /department?fields=id,name&count=1
   If birth date in prompt → include dateOfBirth
   If start date in prompt → ALSO create POST /employee/employment (see below)
@@ -167,7 +167,7 @@ SEARCH:
 - Create department(s) → POST /department (one per department)
 - Create travel expense → GET /department, POST /employee, POST /travelExpense
 - Delete travel expense → GET /travelExpense, DELETE /travelExpense/{id}
-- Update employee → GET /employee, PUT /employee/{id} (include version!)
+- Update employee → GET /employee?fields=id,firstName,lastName,email,dateOfBirth,version, PUT /employee/{id} (MUST include version AND dateOfBirth in body!)
 - Create contact → POST /customer, POST /contact
 
 === ERROR RECOVERY ===
@@ -307,14 +307,38 @@ async def solve(request: Request):
     for f in files:
         data = base64.b64decode(f["content_base64"])
         filename = f["filename"]
-        Path(f"/tmp/{filename}").write_bytes(data)
-        if f.get("mime_type", "").startswith("text") or filename.endswith((".csv", ".json", ".txt")):
+        filepath = Path(f"/tmp/{filename}")
+        filepath.write_bytes(data)
+        mime = f.get("mime_type", "")
+
+        if mime.startswith("text") or filename.endswith((".csv", ".json", ".txt")):
             try:
                 file_contents.append(f"File '{filename}':\n{data.decode('utf-8')[:3000]}")
             except UnicodeDecodeError:
                 file_contents.append(f"File '{filename}': [binary, {len(data)} bytes]")
+        elif mime == "application/pdf" or filename.endswith(".pdf"):
+            # Extract text from PDF
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["python3", "-c", f"import fitz; doc=fitz.open('{filepath}'); print('\\n'.join(p.get_text() for p in doc))"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    file_contents.append(f"PDF '{filename}':\n{result.stdout[:3000]}")
+                else:
+                    # Fallback: try raw text extraction
+                    text = data.decode("latin-1", errors="ignore")
+                    # Extract readable strings from PDF binary
+                    readable = re.findall(r'[\w\s@.,;:!?/\\()-]{4,}', text)
+                    extracted = " ".join(readable)[:2000]
+                    file_contents.append(f"PDF '{filename}' (raw extract):\n{extracted}")
+            except Exception:
+                file_contents.append(f"PDF '{filename}': [{len(data)} bytes, could not extract text]")
+        elif mime.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg")):
+            file_contents.append(f"Image '{filename}': [{mime}, {len(data)} bytes — cannot read image content, use info from prompt text]")
         else:
-            file_contents.append(f"File '{filename}': [{f.get('mime_type', 'unknown')}, {len(data)} bytes]")
+            file_contents.append(f"File '{filename}': [{mime}, {len(data)} bytes]")
 
     user_prompt = f"Task prompt:\n{prompt}"
     if file_contents:
@@ -334,7 +358,7 @@ async def solve(request: Request):
         if has_errors:
             log.info("=== RETRY: Fixing errors ===")
             execution_summary = "\n".join(error_log)
-            retry_response = ask_gemini_retry(prompt, execution_summary)
+            retry_response = ask_gemini_retry(user_prompt, execution_summary)
             log.info(f"Retry plan: {retry_response[:500]}")
 
             try:
@@ -349,7 +373,7 @@ async def solve(request: Request):
                 if still_errors:
                     log.info("=== RETRY 2: Final attempt ===")
                     full_log = "\n".join(error_log)
-                    final_response = ask_gemini_retry(prompt, full_log)
+                    final_response = ask_gemini_retry(user_prompt, full_log)
                     try:
                         final_plan = parse_plan(final_response)
                         log.info(f"Final retry: {len(final_plan)} steps")
