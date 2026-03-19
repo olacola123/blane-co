@@ -72,6 +72,7 @@ class SettlementRelationModule:
             density=density,
             trade_neighbors=trade_neighbors,
             conflict_neighbors=conflict_neighbors,
+            features=features,
             shape=seed_state.grid.shape,
         )
         self.logger.info(
@@ -198,6 +199,7 @@ class SettlementRelationModule:
         density: np.ndarray,
         trade_neighbors: np.ndarray,
         conflict_neighbors: np.ndarray,
+        features: FeatureGrid,
         shape: tuple[int, int],
     ) -> dict[str, np.ndarray]:
         yy, xx = np.indices(shape)
@@ -206,12 +208,16 @@ class SettlementRelationModule:
         trade_access = np.zeros(shape, dtype=float)
         conflict_risk = np.zeros(shape, dtype=float)
         frontier_pressure = np.zeros(shape, dtype=float)
+        coastal_mask = features.channel("coastal_mask")
 
         for index, node in enumerate(nodes):
             dist = np.hypot(xx - node.x, yy - node.y)
             density_boost = _squash(density[index], 4.0)
             trade_neighbor_boost = _squash(trade_neighbors[index], 3.0)
             conflict_neighbor_boost = _squash(conflict_neighbors[index], 3.0)
+            same_landmass = (features.landmass_id == node.landmass_id).astype(float) if node.landmass_id else np.zeros(shape, dtype=float)
+            inland_reach = 0.20 + 0.80 * same_landmass
+            maritime_reach = np.maximum(same_landmass, node.coastline_access * coastal_mask)
 
             growth_strength = np.clip(
                 0.25
@@ -256,11 +262,16 @@ class SettlementRelationModule:
                 1.0,
             )
 
-            settlement_pressure += growth_strength * np.exp(-dist / 5.5)
-            port_pressure += max(node.observed_port_ratio, float(node.initial_has_port)) * np.exp(-dist / 5.0)
-            trade_access += trade_strength * np.exp(-dist / 8.0)
-            conflict_risk += conflict_strength * np.exp(-dist / 6.5)
-            frontier_pressure += frontier_strength * np.exp(-dist / 4.5)
+            settlement_pressure += growth_strength * inland_reach * np.exp(-dist / 5.0)
+            port_pressure += (
+                max(node.observed_port_ratio, float(node.initial_has_port))
+                * maritime_reach
+                * coastal_mask
+                * np.exp(-dist / 4.2)
+            )
+            trade_access += trade_strength * maritime_reach * np.exp(-dist / 7.5)
+            conflict_risk += conflict_strength * inland_reach * np.exp(-dist / 6.0)
+            frontier_pressure += frontier_strength * inland_reach * np.exp(-dist / 4.2)
 
         return {
             "settlement_pressure": self._normalize_map(settlement_pressure),

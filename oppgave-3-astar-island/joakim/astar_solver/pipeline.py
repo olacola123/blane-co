@@ -7,10 +7,17 @@ import time
 from dataclasses import asdict
 
 from .config import SolverConfig
+from .evaluation import (
+    bucketed_error_diagnostics,
+    calibration_diagnostics,
+    classwise_expected_calibration_error,
+    prediction_field_diagnostics,
+)
 from .history import RoundDatasetStore
 from .observations import RoundObservationStore
 from .predictor import PredictionArtifacts, ProbabilisticMapPredictor
 from .query_strategy import HeuristicQuerySelector
+from .tuning import HistoryCalibrationTuner, extract_target_tensor
 from .types import SeedState
 
 
@@ -24,6 +31,15 @@ class RoundSolver:
         self.predictor = ProbabilisticMapPredictor(self.config, logger=self.logger)
         self.query_selector = HeuristicQuerySelector(self.config.query, logger=self.logger)
         self.history_store = RoundDatasetStore(self.config.history_root)
+        if self.config.model.history_tuning_enabled:
+            profile = HistoryCalibrationTuner(self.config.history_root, logger=self.logger).fit(
+                limit=self.config.model.history_tuning_round_limit
+            )
+            self.predictor.set_history_calibration(
+                class_bias=profile.class_bias,
+                class_temperature=profile.class_temperature,
+                rounds_used=profile.rounds_used,
+            )
 
     def solve_round(
         self,
@@ -50,21 +66,27 @@ class RoundSolver:
         }
         observation_store = RoundObservationStore(seed_states)
         planned_total_queries = total_queries or (queries_per_seed * seed_count)
-        per_seed_limit = self._distribute_budget(planned_total_queries, seed_count)
+        minimum_queries_per_seed = self._minimum_queries_per_seed(
+            total_queries=planned_total_queries,
+            seed_count=seed_count,
+        )
+        query_diagnostics = self._empty_query_diagnostics(seed_states)
 
         if not dry_run:
-            self._collect_observations(
+            query_diagnostics = self._collect_observations(
                 round_id=round_id,
                 seed_states=seed_states,
                 feature_cache=feature_cache,
                 observation_store=observation_store,
-                per_seed_limit=per_seed_limit,
+                total_queries=planned_total_queries,
+                minimum_queries_per_seed=minimum_queries_per_seed,
             )
 
         artifacts_by_seed: dict[int, PredictionArtifacts] = {}
         predictions = {}
         submission_responses: dict[int, dict] = {}
         analyses: dict[int, dict] = {}
+        prediction_diagnostics: dict[str, dict] = {}
 
         for seed_state in seed_states:
             artifacts = self.predictor.predict_seed(
@@ -74,6 +96,12 @@ class RoundSolver:
             )
             artifacts_by_seed[seed_state.seed_index] = artifacts
             predictions[seed_state.seed_index] = artifacts.probabilities
+            field_diagnostics = prediction_field_diagnostics(artifacts.probabilities)
+            prediction_diagnostics[str(seed_state.seed_index)] = {
+                "mean_max_prob": field_diagnostics.mean_max_probability,
+                "mean_entropy": field_diagnostics.mean_entropy,
+                "class_frequency": list(field_diagnostics.class_frequency),
+            }
 
         if submit and not dry_run:
             for seed_state in seed_states:
@@ -91,6 +119,16 @@ class RoundSolver:
                 seed_indices=[seed_state.seed_index for seed_state in seed_states],
             )
 
+        ground_truth = {
+            seed_index: target
+            for seed_index, payload in analyses.items()
+            if (target := extract_target_tensor(payload)) is not None
+        }
+        analysis_diagnostics = self._build_analysis_diagnostics(
+            predictions=predictions,
+            targets=ground_truth,
+            feature_cache=feature_cache,
+        )
         self.history_store.save_round(
             round_id=round_id,
             round_metadata=round_data,
@@ -99,14 +137,20 @@ class RoundSolver:
             predictions=predictions,
             submission_responses=submission_responses,
             analyses=analyses,
+            ground_truth=ground_truth,
             config={
                 "queries_per_seed": queries_per_seed,
                 "total_queries": planned_total_queries,
                 "probability": asdict(self.config.probability),
+                "model": asdict(self.config.model),
                 "query": asdict(self.config.query),
                 "local_dynamics_passes": self.config.local_dynamics_passes,
-                "observation_blend": self.config.observation_blend,
                 "latent_strength": self.config.latent_strength,
+            },
+            diagnostics={
+                "query": query_diagnostics,
+                "prediction": prediction_diagnostics,
+                "analysis": analysis_diagnostics,
             },
         )
         return artifacts_by_seed
@@ -180,16 +224,24 @@ class RoundSolver:
         seed_states: list[SeedState],
         feature_cache: dict[int, object],
         observation_store: RoundObservationStore,
-        per_seed_limit: dict[int, int],
-    ) -> None:
+        total_queries: int,
+        minimum_queries_per_seed: int,
+    ) -> dict[str, object]:
         used_per_seed = {seed_state.seed_index: 0 for seed_state in seed_states}
-        pending_viewports = {seed_state.seed_index: [] for seed_state in seed_states}
+        diagnostics = self._empty_query_diagnostics(seed_states)
+        minimum_targets = {
+            seed_state.seed_index: minimum_queries_per_seed
+            for seed_state in seed_states
+        }
+        total_used = 0
 
-        while any(used_per_seed[idx] < per_seed_limit[idx] for idx in used_per_seed):
+        while total_used < total_queries and any(
+            used_per_seed[idx] < minimum_targets[idx] for idx in used_per_seed
+        ):
             made_progress = False
             for seed_state in seed_states:
                 seed_index = seed_state.seed_index
-                if used_per_seed[seed_index] >= per_seed_limit[seed_index]:
+                if used_per_seed[seed_index] >= minimum_targets[seed_index]:
                     continue
 
                 artifacts = self.predictor.predict_seed(
@@ -201,50 +253,185 @@ class RoundSolver:
                     seed_state=seed_state,
                     artifacts=artifacts,
                     coverage=observation_store.get_seed_memory(seed_index).observed,
-                    already_planned=pending_viewports[seed_index],
+                    queries_used_for_seed=used_per_seed[seed_index],
+                    stage="coverage",
+                    global_progress=total_used / max(total_queries, 1),
                 )
                 if candidate is None:
                     continue
 
-                pending_viewports[seed_index].append(candidate.viewport)
-                try:
-                    result = self.client.simulate(
-                        round_id,
-                        seed_index,
-                        candidate.viewport.x,
-                        candidate.viewport.y,
-                        candidate.viewport.w,
-                        candidate.viewport.h,
-                    )
-                except Exception as exc:
-                    self.logger.error("Simulation failed for seed %s: %s", seed_index, exc)
-                    response = getattr(exc, "response", None)
-                    if response is not None and response.status_code == 429:
-                        time.sleep(2.0)
-                    continue
-
-                observation_store.add_simulation_result(round_id, seed_index, result)
-                used_per_seed[seed_index] += 1
-                pending_viewports[seed_index].clear()
-                made_progress = True
-                self.logger.info(
-                    "Observed seed=%s query=%s/%s budget=%s/%s",
-                    seed_index,
-                    used_per_seed[seed_index],
-                    per_seed_limit[seed_index],
-                    result.get("queries_used", "?"),
-                    result.get("queries_max", "?"),
-                )
-                time.sleep(0.25)
+                if self._execute_query(
+                    round_id=round_id,
+                    seed_index=seed_index,
+                    candidate=candidate,
+                    observation_store=observation_store,
+                    used_per_seed=used_per_seed,
+                    diagnostics=diagnostics,
+                    total_queries=total_queries,
+                ):
+                    total_used += 1
+                    made_progress = True
 
             if not made_progress:
                 break
+        while total_used < total_queries:
+            best_seed_state: SeedState | None = None
+            best_candidate = None
+            best_score = float("-inf")
+            for seed_state in seed_states:
+                seed_index = seed_state.seed_index
+                artifacts = self.predictor.predict_seed(
+                    seed_state=seed_state,
+                    round_store=observation_store,
+                    features=feature_cache[seed_index],
+                )
+                candidate = self.query_selector.select_next(
+                    seed_state=seed_state,
+                    artifacts=artifacts,
+                    coverage=observation_store.get_seed_memory(seed_index).observed,
+                    queries_used_for_seed=used_per_seed[seed_index],
+                    stage="adaptive",
+                    global_progress=total_used / max(total_queries, 1),
+                )
+                if candidate is None:
+                    continue
+                if candidate.score > best_score:
+                    best_score = candidate.score
+                    best_seed_state = seed_state
+                    best_candidate = candidate
+
+            if best_seed_state is None or best_candidate is None:
+                break
+
+            if not self._execute_query(
+                round_id=round_id,
+                seed_index=best_seed_state.seed_index,
+                candidate=best_candidate,
+                observation_store=observation_store,
+                used_per_seed=used_per_seed,
+                diagnostics=diagnostics,
+                total_queries=total_queries,
+            ):
+                break
+            total_used += 1
+
+        self.logger.info(
+            "Query summary total=%s per_seed=%s unique=%s overlap=%s deliberate=%.3f accidental=%.3f viewport_sizes=%s",
+            total_used,
+            diagnostics["queries_per_seed"],
+            diagnostics["unique_coverage_by_seed"],
+            diagnostics["overlap_by_seed"],
+            diagnostics["deliberate_repeat_overlap"],
+            diagnostics["accidental_overlap"],
+            diagnostics["viewport_sizes"],
+        )
+        return diagnostics
+
+    def _minimum_queries_per_seed(self, total_queries: int, seed_count: int) -> int:
+        if seed_count <= 0 or total_queries <= 0:
+            return 0
+        return min(self.config.query.minimum_queries_per_seed, total_queries // seed_count)
 
     @staticmethod
-    def _distribute_budget(total_queries: int, seed_count: int) -> dict[int, int]:
-        base = total_queries // seed_count
-        remainder = total_queries % seed_count
+    def _empty_query_diagnostics(seed_states: list[SeedState]) -> dict[str, object]:
         return {
-            seed_index: base + (1 if seed_index < remainder else 0)
-            for seed_index in range(seed_count)
+            "queries_per_seed": {str(seed_state.seed_index): 0 for seed_state in seed_states},
+            "viewport_sizes": {},
+            "stages": {"coverage": 0, "adaptive": 0},
+            "unique_coverage_by_seed": {str(seed_state.seed_index): 0.0 for seed_state in seed_states},
+            "overlap_by_seed": {str(seed_state.seed_index): 0.0 for seed_state in seed_states},
+            "deliberate_repeat_overlap": 0.0,
+            "accidental_overlap": 0.0,
         }
+
+    def _execute_query(
+        self,
+        round_id: str,
+        seed_index: int,
+        candidate,
+        observation_store: RoundObservationStore,
+        used_per_seed: dict[int, int],
+        diagnostics: dict[str, object],
+        total_queries: int,
+    ) -> bool:
+        try:
+            result = self.client.simulate(
+                round_id,
+                seed_index,
+                candidate.viewport.x,
+                candidate.viewport.y,
+                candidate.viewport.w,
+                candidate.viewport.h,
+            )
+        except Exception as exc:
+            self.logger.error("Simulation failed for seed %s: %s", seed_index, exc)
+            response = getattr(exc, "response", None)
+            if response is not None and response.status_code == 429:
+                time.sleep(2.0)
+            return False
+
+        observation_store.add_simulation_result(round_id, seed_index, result)
+        used_per_seed[seed_index] += 1
+        self._record_query_diagnostics(
+            diagnostics=diagnostics,
+            seed_index=seed_index,
+            candidate=candidate,
+            coverage=observation_store.get_seed_memory(seed_index).observed,
+        )
+        self.logger.info(
+            "Observed seed=%s stage=%s query=%s/%s budget=%s/%s unique=%.3f overlap=%.3f deliberate=%.3f accidental=%.3f sizes=%s",
+            seed_index,
+            candidate.stage,
+            sum(used_per_seed.values()),
+            total_queries,
+            result.get("queries_used", "?"),
+            result.get("queries_max", "?"),
+            diagnostics["unique_coverage_by_seed"][str(seed_index)],
+            diagnostics["overlap_by_seed"][str(seed_index)],
+            diagnostics["deliberate_repeat_overlap"],
+            diagnostics["accidental_overlap"],
+            diagnostics["viewport_sizes"],
+        )
+        time.sleep(0.25)
+        return True
+
+    def _record_query_diagnostics(
+        self,
+        diagnostics: dict[str, object],
+        seed_index: int,
+        candidate,
+        coverage,
+    ) -> None:
+        seed_key = str(seed_index)
+        diagnostics["queries_per_seed"][seed_key] += 1
+        diagnostics["stages"][candidate.stage] += 1
+        size_key = f"{candidate.viewport.w}x{candidate.viewport.h}"
+        diagnostics["viewport_sizes"][size_key] = diagnostics["viewport_sizes"].get(size_key, 0) + 1
+        diagnostics["deliberate_repeat_overlap"] += float(candidate.intentional_repeat_overlap)
+        diagnostics["accidental_overlap"] += float(candidate.accidental_overlap)
+        unique_coverage = float((coverage > 0).mean())
+        overlap = float(max(float(coverage.sum()) - float((coverage > 0).sum()), 0.0) / coverage.size)
+        diagnostics["unique_coverage_by_seed"][seed_key] = unique_coverage
+        diagnostics["overlap_by_seed"][seed_key] = overlap
+
+    def _build_analysis_diagnostics(
+        self,
+        predictions: dict[int, object],
+        targets: dict[int, object],
+        feature_cache: dict[int, object],
+    ) -> dict[str, dict]:
+        diagnostics: dict[str, dict] = {}
+        for seed_index, target in targets.items():
+            prediction = predictions.get(seed_index)
+            if prediction is None:
+                continue
+            calibration = calibration_diagnostics(target, prediction)
+            diagnostics[str(seed_index)] = {
+                "nll": calibration.nll,
+                "brier": calibration.brier,
+                "ece": calibration.ece,
+                "weighted_kl": calibration.weighted_kl_value,
+                "classwise_ece": classwise_expected_calibration_error(target, prediction),
+                "bucketed_kl": bucketed_error_diagnostics(target, prediction, feature_cache[seed_index]),
+            }
+        return diagnostics

@@ -46,11 +46,6 @@ async def solve(request: dict):
         temperature = float(request.get("temperature", 1.0))
 
         config = SolverConfig(
-            probability=SolverConfig().probability,
-            query=SolverConfig().query,
-            local_dynamics_passes=SolverConfig().local_dynamics_passes,
-            observation_blend=SolverConfig().observation_blend,
-            latent_strength=SolverConfig().latent_strength,
             log_level="INFO",
             history_root="/tmp/history",
         )

@@ -50,6 +50,44 @@ def temperature_scale(
     return safe_normalize(scaled, axis=-1)
 
 
+def calibrate_probabilities(
+    probabilities: np.ndarray,
+    temperature: float = 1.0,
+    class_temperatures: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    class_bias: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    enable_temperature_scaling: bool = True,
+    enable_class_calibration: bool = True,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Apply global and class-wise calibration in log-probability space."""
+    logits = np.log(np.clip(probabilities, eps, 1.0))
+
+    if enable_temperature_scaling:
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        if not np.isclose(temperature, 1.0):
+            logits = logits / float(temperature)
+
+    if enable_class_calibration:
+        if class_temperatures is not None:
+            class_temp = np.asarray(class_temperatures, dtype=float)
+            if class_temp.shape != (probabilities.shape[-1],):
+                raise ValueError("class_temperatures must match the class dimension")
+            if np.any(class_temp <= 0.0):
+                raise ValueError("class_temperatures must be positive")
+            logits = logits / class_temp.reshape((1,) * (probabilities.ndim - 1) + (-1,))
+
+        if class_bias is not None:
+            bias = np.asarray(class_bias, dtype=float)
+            if bias.shape != (probabilities.shape[-1],):
+                raise ValueError("class_bias must match the class dimension")
+            logits = logits + bias.reshape((1,) * (probabilities.ndim - 1) + (-1,))
+
+    logits -= np.max(logits, axis=-1, keepdims=True)
+    calibrated = np.exp(logits)
+    return safe_normalize(calibrated, axis=-1)
+
+
 def ensemble_average(
     predictions: list[np.ndarray],
     floor: float,

@@ -155,6 +155,7 @@ class MapFeatureExtractor:
         distance_ocean = _distance_to_sources(ocean_mask)
         distance_coast = _distance_to_sources(coastal_mask.astype(bool))
         distance_mountain = _distance_to_sources(mountain_mask)
+        distance_ruin = _distance_to_sources(ruin_mask)
 
         settlement_source = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
         port_source = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
@@ -165,6 +166,15 @@ class MapFeatureExtractor:
 
         distance_settlement = _distance_to_sources(settlement_source)
         distance_port = _distance_to_sources(port_source)
+        settlement_landmass_ids = {
+            int(landmass_id[settlement.y, settlement.x])
+            for settlement in seed_state.settlements
+            if int(landmass_id[settlement.y, settlement.x]) != 0
+        }
+        same_landmass_as_initial_settlement = np.isin(
+            landmass_id,
+            tuple(settlement_landmass_ids),
+        ).astype(float)
 
         settlement_proximity = np.exp(-distance_settlement / 4.5)
         port_proximity = np.exp(-distance_port / 4.5)
@@ -218,10 +228,12 @@ class MapFeatureExtractor:
                 "distance_ocean_norm",
                 "distance_coast_norm",
                 "distance_mountain_norm",
+                "distance_ruin_norm",
                 "distance_settlement_norm",
                 "distance_port_norm",
                 "settlement_proximity",
                 "port_proximity",
+                "same_landmass_as_initial_settlement",
                 "local_forest_density",
                 "local_mountain_density",
                 "local_settlement_density",
@@ -241,10 +253,12 @@ class MapFeatureExtractor:
                 distance_ocean / max_distance,
                 distance_coast / max_distance,
                 distance_mountain / max_distance,
+                distance_ruin / max_distance,
                 distance_settlement / max_distance,
                 distance_port / max_distance,
                 settlement_proximity,
                 port_proximity,
+                same_landmass_as_initial_settlement,
                 local_forest_density,
                 local_mountain_density,
                 local_settlement_density,

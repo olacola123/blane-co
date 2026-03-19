@@ -8,6 +8,9 @@ import numpy as np
 
 from .probability import predictive_entropy
 
+if False:  # pragma: no cover
+    from .features import FeatureGrid
+
 
 def kl_divergence(target: np.ndarray, prediction: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """Cell-wise KL(target || prediction)."""
@@ -47,6 +50,15 @@ class CalibrationDiagnostics:
     weighted_kl_value: float
 
 
+@dataclass(slots=True)
+class PredictionFieldDiagnostics:
+    """Prediction-only diagnostics to log every round."""
+
+    mean_max_probability: float
+    mean_entropy: float
+    class_frequency: tuple[float, ...]
+
+
 def expected_calibration_error(
     target: np.ndarray,
     prediction: np.ndarray,
@@ -78,3 +90,60 @@ def calibration_diagnostics(target: np.ndarray, prediction: np.ndarray) -> Calib
         ece=expected_calibration_error(target, prediction),
         weighted_kl_value=weighted_kl(target, prediction),
     )
+
+
+def prediction_field_diagnostics(prediction: np.ndarray) -> PredictionFieldDiagnostics:
+    """Summarize the sharpness and class mix of one prediction tensor."""
+    class_frequency = tuple(float(value) for value in prediction.reshape(-1, prediction.shape[-1]).mean(axis=0))
+    return PredictionFieldDiagnostics(
+        mean_max_probability=float(prediction.max(axis=-1).mean()),
+        mean_entropy=float(predictive_entropy(prediction).mean()),
+        class_frequency=class_frequency,
+    )
+
+
+def classwise_expected_calibration_error(
+    target: np.ndarray,
+    prediction: np.ndarray,
+    num_bins: int = 10,
+) -> dict[int, float]:
+    """One-vs-rest ECE per class."""
+    result: dict[int, float] = {}
+    for class_index in range(prediction.shape[-1]):
+        confidences = prediction[..., class_index].ravel()
+        targets = target[..., class_index].ravel()
+        bins = np.linspace(0.0, 1.0, num_bins + 1)
+        ece = 0.0
+        for lower, upper in zip(bins[:-1], bins[1:]):
+            mask = (confidences >= lower) & (confidences < upper if upper < 1.0 else confidences <= upper)
+            if not np.any(mask):
+                continue
+            avg_conf = float(confidences[mask].mean())
+            avg_target = float(targets[mask].mean())
+            ece += float(mask.mean()) * abs(avg_conf - avg_target)
+        result[class_index] = float(ece)
+    return result
+
+
+def bucketed_error_diagnostics(
+    target: np.ndarray,
+    prediction: np.ndarray,
+    features: "FeatureGrid",
+) -> dict[str, float]:
+    """Feature-conditioned KL diagnostics for common geography buckets."""
+    cell_kl = kl_divergence(target, prediction)
+    buckets = {
+        "coastal": features.channel("coastal_mask") > 0.5,
+        "inland": features.channel("coastal_mask") <= 0.5,
+        "near_forest": features.channel("forest_adj") > 0.30,
+        "far_forest": features.channel("forest_adj") <= 0.30,
+        "near_initial_settlement": features.channel("settlement_proximity") > 0.35,
+        "far_initial_settlement": features.channel("settlement_proximity") <= 0.35,
+    }
+    diagnostics: dict[str, float] = {}
+    for name, mask in buckets.items():
+        if not np.any(mask):
+            diagnostics[name] = 0.0
+            continue
+        diagnostics[name] = float(cell_kl[mask].mean())
+    return diagnostics

@@ -46,6 +46,6 @@ data/
 # Logs
 logs/
 
-# Local Astar Island round history
-oppgave-3/joakim/history/
+# Local Astar Island working copy & history
+oppgave-3/joakim/
 oppgave-3-astar-island/joakim/history/

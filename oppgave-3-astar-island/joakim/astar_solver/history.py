@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from .observations import RoundObservationStore
+from .tuning import extract_target_tensor
 from .types import SeedState, ViewportObservation
 
 
@@ -31,6 +32,7 @@ class RoundDatasetStore:
         analyses: dict[int, dict[str, Any]] | None = None,
         ground_truth: dict[int, np.ndarray] | None = None,
         config: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> Path:
         """Write one round bundle to disk."""
         round_dir = self.root / round_id
@@ -48,6 +50,7 @@ class RoundDatasetStore:
             "submission_responses": submission_responses or {},
             "analyses": analyses or {},
             "ground_truth": {},
+            "diagnostics": diagnostics or {},
         }
 
         for seed_state in seed_states:
@@ -95,6 +98,7 @@ class RoundDatasetStore:
             "observations": [],
             "predictions": {},
             "ground_truth": {},
+            "diagnostics": manifest.get("diagnostics", {}),
         }
 
         for item in manifest.get("initial_states", []):
@@ -119,9 +123,16 @@ class RoundDatasetStore:
         manifest_path = round_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
         existing = manifest.get("analyses", {})
+        ground_truth = manifest.get("ground_truth", {})
         for seed_index, payload in analyses.items():
             existing[str(seed_index)] = payload
+            target = extract_target_tensor(payload)
+            if target is not None:
+                target_path = Path("arrays") / f"seed_{seed_index}_ground_truth.npy"
+                np.save(round_dir / target_path, target)
+                ground_truth[str(seed_index)] = str(target_path)
         manifest["analyses"] = existing
+        manifest["ground_truth"] = ground_truth
         manifest_path.write_text(json.dumps(manifest, indent=2))
         return manifest_path
 

@@ -37,7 +37,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--queries",
         type=int,
         default=10,
-        help="Planned queries per seed when total queries are not set",
+        help="Budget hint per seed when total queries are not set",
     )
     parser.add_argument(
         "--total-queries",
@@ -108,11 +108,6 @@ def run(
     )
 
     config = SolverConfig(
-        probability=SolverConfig().probability,
-        query=SolverConfig().query,
-        local_dynamics_passes=SolverConfig().local_dynamics_passes,
-        observation_blend=SolverConfig().observation_blend,
-        latent_strength=SolverConfig().latent_strength,
         log_level=log_level.upper(),
         history_root=history_root,
     )
