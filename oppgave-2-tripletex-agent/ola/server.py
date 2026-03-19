@@ -1,21 +1,24 @@
 """
 Tripletex AI Accounting Agent — NM i AI 2026
-v3: Gemini Function Calling — modellen kaller Tripletex API direkte.
+v4: Fikset system prompt, thread-safe, bedre PDF-parsing, bedre oppskrifter.
 """
 
 import base64
+import io
 import json
 import logging
 import os
 import re
+import threading
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 from google import genai
-from google.genai.types import GenerateContentConfig, AutomaticFunctionCallingConfig, Tool, FunctionDeclaration, Schema
+from google.genai.types import GenerateContentConfig, AutomaticFunctionCallingConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -29,11 +32,12 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SUBMISSION_LOG_PATH = Path(os.environ.get("SUBMISSION_LOG", "/tmp/tripletex_submissions.jsonl"))
 
-# Global state per request (set in solve())
-_tx_session = None
-_tx_base_url = ""
-_call_count = 0
-_error_count = 0
+# Thread-local state for concurrent requests
+_local = threading.local()
+
+
+def _get_ctx():
+    return getattr(_local, "ctx", None)
 
 
 # === TRIPLETEX TOOL FUNCTIONS (called by Gemini) ===
@@ -48,17 +52,17 @@ def tripletex_get(endpoint: str, query_params: str = "") -> str:
     Returns:
         JSON response as string with the API result
     """
-    global _call_count, _error_count
-    _call_count += 1
-    url = f"{_tx_base_url}/{endpoint.lstrip('/')}"
+    ctx = _get_ctx()
+    ctx["call_count"] += 1
+    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
     params = dict(p.split("=", 1) for p in query_params.split("&") if "=" in p) if query_params else None
-    resp = _tx_session.get(url, params=params)
+    resp = ctx["session"].get(url, params=params)
     if resp.status_code >= 400:
-        _error_count += 1
-        log.error(f"GET {endpoint} → {resp.status_code}: {resp.text[:200]}")
+        ctx["error_count"] += 1
+        log.error(f"GET {endpoint} → {resp.status_code}: {resp.text[:300]}")
     else:
         log.info(f"GET {endpoint} → {resp.status_code}")
-    return resp.text[:4000]
+    return resp.text[:5000]
 
 
 def tripletex_post(endpoint: str, body_json: str) -> str:
@@ -71,20 +75,21 @@ def tripletex_post(endpoint: str, body_json: str) -> str:
     Returns:
         JSON response as string with the created resource (including its id)
     """
-    global _call_count, _error_count
-    _call_count += 1
-    url = f"{_tx_base_url}/{endpoint.lstrip('/')}"
+    ctx = _get_ctx()
+    ctx["call_count"] += 1
+    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
     try:
         data = json.loads(body_json)
     except json.JSONDecodeError:
         return json.dumps({"error": "Invalid JSON in body_json"})
-    resp = _tx_session.post(url, json=data)
+    log.info(f"POST {endpoint} BODY: {body_json[:300]}")
+    resp = ctx["session"].post(url, json=data)
     if resp.status_code >= 400:
-        _error_count += 1
-        log.error(f"POST {endpoint} → {resp.status_code}: {resp.text[:200]}")
+        ctx["error_count"] += 1
+        log.error(f"POST {endpoint} → {resp.status_code}: {resp.text[:300]}")
     else:
         log.info(f"POST {endpoint} → {resp.status_code}")
-    return resp.text[:4000]
+    return resp.text[:5000]
 
 
 def tripletex_put(endpoint: str, body_json: str = "", query_params: str = "") -> str:
@@ -101,27 +106,26 @@ def tripletex_put(endpoint: str, body_json: str = "", query_params: str = "") ->
     Returns:
         JSON response as string
     """
-    global _call_count, _error_count
-    _call_count += 1
-    url = f"{_tx_base_url}/{endpoint.lstrip('/')}"
+    ctx = _get_ctx()
+    ctx["call_count"] += 1
+    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
     params = dict(p.split("=", 1) for p in query_params.split("&") if "=" in p) if query_params else None
 
     if "/:" in endpoint:
-        # Action endpoint — use query params
-        resp = _tx_session.put(url, params=params)
+        resp = ctx["session"].put(url, params=params)
     else:
         try:
             data = json.loads(body_json) if body_json else {}
         except json.JSONDecodeError:
             return json.dumps({"error": "Invalid JSON in body_json"})
-        resp = _tx_session.put(url, json=data, params=params)
+        resp = ctx["session"].put(url, json=data, params=params)
 
     if resp.status_code >= 400:
-        _error_count += 1
-        log.error(f"PUT {endpoint} → {resp.status_code}: {resp.text[:200]}")
+        ctx["error_count"] += 1
+        log.error(f"PUT {endpoint} → {resp.status_code}: {resp.text[:300]}")
     else:
         log.info(f"PUT {endpoint} → {resp.status_code}")
-    return resp.text[:4000] if resp.text else '{"status": "ok"}'
+    return resp.text[:5000] if resp.text else '{"status": "ok"}'
 
 
 def tripletex_delete(endpoint: str) -> str:
@@ -133,91 +137,155 @@ def tripletex_delete(endpoint: str) -> str:
     Returns:
         JSON response confirming deletion
     """
-    global _call_count, _error_count
-    _call_count += 1
-    url = f"{_tx_base_url}/{endpoint.lstrip('/')}"
-    resp = _tx_session.delete(url)
+    ctx = _get_ctx()
+    ctx["call_count"] += 1
+    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
+    resp = ctx["session"].delete(url)
     if resp.status_code >= 400:
-        _error_count += 1
-        log.error(f"DELETE {endpoint} → {resp.status_code}: {resp.text[:200]}")
+        ctx["error_count"] += 1
+        log.error(f"DELETE {endpoint} → {resp.status_code}: {resp.text[:300]}")
     else:
         log.info(f"DELETE {endpoint} → {resp.status_code}")
-    return resp.text[:2000] if resp.text else '{"deleted": true}'
+    return resp.text[:3000] if resp.text else '{"deleted": true}'
+
+
+# === PDF EXTRACTION ===
+
+def extract_pdf_text(data: bytes) -> str:
+    """Extract text from PDF using pdfplumber, fallback to regex."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            pages = []
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    pages.append(text)
+                # Also try tables
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if row:
+                            pages.append(" | ".join(str(c) for c in row if c))
+            if pages:
+                return "\n".join(pages)[:4000]
+    except ImportError:
+        log.warning("pdfplumber not installed, using regex fallback")
+    except Exception as e:
+        log.warning(f"pdfplumber failed: {e}")
+
+    # Fallback: regex on raw bytes
+    text = data.decode("latin-1", errors="ignore")
+    readable = re.findall(r'[\w\s@.,;:!?/\\()-]{4,}', text)
+    return " ".join(readable)[:3000]
 
 
 # === SYSTEM PROMPT ===
 
-SYSTEM_PROMPT = """You are a Tripletex accounting API agent. You receive accounting task prompts and must complete them by calling the Tripletex API using the provided tool functions.
+SYSTEM_PROMPT = """You are a Tripletex accounting API agent. You receive accounting task prompts in various languages (Norwegian, English, Spanish, Portuguese, Nynorsk, German, French) and must complete them by calling the Tripletex API.
 
 CRITICAL RULES:
-- Call the tool functions to execute API operations. You have: tripletex_get, tripletex_post, tripletex_put, tripletex_delete
-- The Tripletex account starts EMPTY each time. Create all prerequisites before referencing them.
-- EXTRACT EVERY DETAIL from the prompt: names, emails, dates, phone numbers, org numbers, addresses, amounts, roles. Missing fields = failed score.
-- Dates format: YYYY-MM-DD. Today: 2026-03-19.
-- Read API responses carefully. Use actual IDs from responses in subsequent calls.
-- If a call fails, read the error message and fix your approach. Do NOT repeat the same failing call.
-- MINIMIZE API calls — efficiency is scored. Plan ahead, don't trial-and-error.
-- When done, just say "Task completed."
+1. EXTRACT EVERY DETAIL from the prompt: names, emails, dates, phone numbers, org numbers, addresses, amounts, roles. Missing fields = failed score.
+2. The Tripletex account starts EMPTY each time. Create all prerequisites before referencing them.
+3. Dates format: YYYY-MM-DD. Today: 2026-03-20.
+4. Read API responses carefully. Use actual IDs from responses in subsequent calls.
+5. If a call fails, read the error and fix your approach. NEVER repeat the same failing call.
+6. MINIMIZE API calls — efficiency is scored. Plan the full sequence before starting.
+7. When done, say "Task completed."
 
-=== API CHEAT SHEET (exact field names) ===
+=== STEP-BY-STEP RECIPES (follow these EXACTLY) ===
 
-GET /department?fields=id,name&count=1 → ALWAYS call first to get department ID for employees
+RECIPE: CREATE EMPLOYEE WITH START DATE
+1. GET /department?fields=id,name&count=1 → save department_id
+2. POST /employee {"firstName":"X", "lastName":"Y", "email":"Z", "dateOfBirth":"YYYY-MM-DD", "userType":"STANDARD", "department":{"id": department_id}}
+   - dateOfBirth is REQUIRED for employment. Parse birth date from prompt (convert "6. March 1990" → "1990-03-06")
+   - Include phoneNumberMobile if phone number is in prompt
+3. POST /employee/employment {"employee":{"id": employee_id}, "startDate":"YYYY-MM-DD"}
+   - Do NOT include employmentType field
 
-POST /employee:
-  REQUIRED: firstName, lastName, email, userType ("STANDARD"), department ({"id": N})
-  OPTIONAL: dateOfBirth ("YYYY-MM-DD"), phoneNumberMobile, phoneNumberHome, phoneNumberWork
-  NOTE: userType MUST be "STANDARD" (not "ADMINISTRATOR" — that value is rejected by API)
-  For admin role: create with userType="STANDARD", then set admin via PUT /employee/{id} or entitlements
+RECIPE: CREATE CUSTOMER WITH ADDRESS
+1. POST /customer {"name":"X", "organizationNumber":"Y", "email":"Z", "isCustomer":true, "postalAddress":{"addressLine1":"Street 123", "postalCode":"0001", "city":"Oslo"}}
+   - Include ALL fields from prompt. Every missing field = lost points.
 
-POST /employee/employment:
-  REQUIRED: employee ({"id": N}), startDate ("YYYY-MM-DD")
-  Employee MUST have dateOfBirth set. Do NOT include employmentType field.
+RECIPE: CREATE SUPPLIER (leverandør/proveedor/fornecedor/fournisseur/Lieferant)
+1. POST /customer {"name":"X", "organizationNumber":"Y", "email":"Z", "isSupplier":true, "isCustomer":false}
+   - Suppliers use the /customer endpoint with isSupplier=true
 
-POST /customer:
-  REQUIRED: name
-  OPTIONAL: email, organizationNumber, isCustomer (true), isSupplier (true for suppliers), phoneNumber, postalAddress ({"addressLine1":"..","postalCode":"..","city":".."})
-  For supplier (leverandør/proveedor/fornecedor/fournisseur/Lieferant): isSupplier=true
+RECIPE: CREATE PRODUCT
+1. POST /product {"name":"X", "number":"Y", "priceExcludingVatCurrency": PRICE, "priceIncludingVatCurrency": PRICE*1.25, "vatType":{"id":3}}
+   - WRONG field name: priceExcludingVat → CORRECT: priceExcludingVatCurrency
+   - vatType id 3 = 25% MVA (standard Norwegian VAT)
+   - ALWAYS calculate and include priceIncludingVatCurrency = price × 1.25
 
-POST /product:
-  REQUIRED: name
-  OPTIONAL: number (str), priceExcludingVatCurrency (float), priceIncludingVatCurrency (float), vatType ({"id":3})
-  WRONG NAMES: priceExcludingVat → USE priceExcludingVatCurrency
-  vatType id 3 = 25% MVA. priceIncludingVatCurrency = priceExcludingVatCurrency × 1.25
+RECIPE: CREATE INVOICE
+1. POST /customer {"name":"X", "organizationNumber":"Y", "isCustomer":true}
+2. POST /product {"name":"PRODUCT_NAME", "priceExcludingVatCurrency": PRICE, "priceIncludingVatCurrency": PRICE*1.25, "vatType":{"id":3}}
+3. POST /order {"customer":{"id": customer_id}, "deliveryDate":"2026-03-20", "orderDate":"2026-03-20"}
+4. POST /order/orderline {"order":{"id": order_id}, "product":{"id": product_id}, "count":1}
+5. POST /invoice {"invoiceDate":"2026-03-20", "invoiceDueDate":"2026-04-20", "orders":[{"id": order_id}]}
+   - Order MUST have orderlines before creating invoice
+   - invoiceDueDate = invoiceDate + 30 days
 
+RECIPE: CREATE INVOICE AND REGISTER PAYMENT
+1-5. Follow INVOICE recipe above
+6. GET /invoice/paymentType?fields=id,description&count=5 → find a payment type ID
+7. PUT /invoice/{invoice_id}/:payment with query_params: "paymentDate=2026-03-20&paymentTypeId=PAYMENT_TYPE_ID&paidAmount=TOTAL_WITH_VAT"
+   - paidAmount must include VAT (amount × 1.25)
+
+RECIPE: CREATE PROJECT
+1. GET /department?fields=id,name&count=1 → save department_id
+2. POST /employee {"firstName":"X", "lastName":"Y", "email":"Z", "userType":"EXTENDED", "department":{"id": department_id}}
+   *** CRITICAL: Project manager MUST have userType="EXTENDED" — "STANDARD" will fail! ***
+3. POST /customer {"name":"COMPANY", "organizationNumber":"ORG_NR", "isCustomer":true}
+4. POST /project {"name":"PROJECT_NAME", "number":"1", "startDate":"2026-03-20", "projectManager":{"id": employee_id}, "customer":{"id": customer_id}}
+
+RECIPE: CREATE DEPARTMENTS
+1. POST /department {"name":"Dept1", "departmentNumber":1}
+2. POST /department {"name":"Dept2", "departmentNumber":2}
+3. POST /department {"name":"Dept3", "departmentNumber":3}
+   - Each department MUST have a unique departmentNumber (incrementing integers)
+
+RECIPE: CREATE TRAVEL EXPENSE (reiseregning)
+1. GET /department?fields=id,name&count=1 → save department_id
+2. POST /employee {"firstName":"X", "lastName":"Y", "email":"Z", "userType":"STANDARD", "department":{"id": department_id}}
+3. POST /travelExpense {"employee":{"id": employee_id}, "title":"TITLE", "travelDetails":{"departureDate":"YYYY-MM-DD", "returnDate":"YYYY-MM-DD"}}
+   - Dates go INSIDE travelDetails, NOT as flat fields
+
+RECIPE: DELETE TRAVEL EXPENSE
+1. GET /travelExpense?fields=id,title&count=100 → find the matching expense by title/employee
+2. DELETE /travelExpense/{id}
+
+RECIPE: CREATE CONTACT PERSON
+1. POST /customer {"name":"COMPANY", "isCustomer":true} (if customer doesn't exist)
+2. POST /contact {"firstName":"X", "lastName":"Y", "email":"Z", "customer":{"id": customer_id}}
+
+RECIPE: UPDATE EXISTING RESOURCE
+1. GET /endpoint?fields=id,...,version → find the resource and get its version
+2. PUT /endpoint/{id} with the updated fields AND the version field
+
+=== FIELD REFERENCE ===
+
+POST /employee: firstName, lastName, email, userType ("STANDARD"|"EXTENDED"|"NO_ACCESS"), department ({"id":N}), dateOfBirth ("YYYY-MM-DD"), phoneNumberMobile, phoneNumberHome, phoneNumberWork
+POST /customer: name, organizationNumber, email, phoneNumber, isCustomer (bool), isSupplier (bool), postalAddress ({"addressLine1":"..","postalCode":"..","city":".."})
+POST /product: name, number (str), priceExcludingVatCurrency (float), priceIncludingVatCurrency (float), vatType ({"id":3})
 POST /order: customer ({"id":N}), deliveryDate, orderDate
 POST /order/orderline: order ({"id":N}), product ({"id":N}), count (float)
 POST /invoice: invoiceDate, invoiceDueDate, orders ([{"id":N}])
-  NOTE: Invoice requires orderlines on the order first. Create order, then orderline, then invoice.
-
-PUT /invoice/{id}/:payment → USE query_params: "paymentDate=YYYY-MM-DD&paymentTypeId=ID&paidAmount=TOTAL_WITH_VAT"
-  First GET /invoice/paymentType?fields=id,description&count=5 to find paymentTypeId
-
-POST /project: name, number (str), startDate, projectManager ({"id":N}), optionally customer ({"id":N})
-POST /department: name, departmentNumber (int)
-POST /travelExpense: employee ({"id":N}), title, travelDetails ({"departureDate":"YYYY-MM-DD","returnDate":"YYYY-MM-DD"})
-  NOTE: dates go inside travelDetails object, NOT as flat fields. departureDate/returnDate do NOT exist as top-level fields.
-POST /contact: firstName, lastName, customer ({"id":N}), optionally email
-
-For DELETE: first GET to find the ID, then DELETE /endpoint/{id}
-For UPDATE: first GET with ?fields=id,...,version, then PUT /endpoint/{id} with version field included
-
-=== COMMON PATTERNS ===
-Invoice chain: POST /customer → POST /product → POST /order → POST /order/orderline → POST /invoice
-Payment: invoice chain + GET /invoice/paymentType + PUT /invoice/{id}/:payment
-Employee with start date: GET /department → POST /employee (with dateOfBirth!) → POST /employee/employment
-Project: GET /department → POST /employee → POST /customer → POST /project
+POST /project: name, number (str), startDate, projectManager ({"id":N}), customer ({"id":N})
+POST /department: name, departmentNumber (int, unique)
+POST /travelExpense: employee ({"id":N}), title, travelDetails ({"departureDate":"..","returnDate":".."})
+POST /contact: firstName, lastName, customer ({"id":N}), email
+POST /employee/employment: employee ({"id":N}), startDate
 
 === ERROR RECOVERY ===
-- "email already exists" → GET /employee?email=X&fields=id,firstName,lastName to find existing ID. Use that ID.
-- "field does not exist" → wrong field name, check cheat sheet above
-- "Feltet må fylles ut" → required field missing, add it
+- "email already exists" → GET /employee?email=X&fields=id to find existing. Use that ID.
+- "Feltet må fylles ut" → required field missing
 - "Produktnummeret er i bruk" → use a different product number
-- "Faktura kan ikke opprettes" → likely missing bank account or orderlines. Ensure order has orderlines before creating invoice.
-- "projectManager.id Oppgitt ansatt..." → the employee needs the correct access rights. Create employee with userType="STANDARD".
-- "Verdien er ikke av korrekt type" for userType → ONLY use "STANDARD". Never "ADMINISTRATOR", "ADMIN", etc.
-- "Numm..." for departmentNumber → each department must have a UNIQUE number. Use incrementing numbers (1, 2, 3...).
-- NEVER retry with the exact same data that caused an error — always change something.
-- GET /invoice REQUIRES invoiceDateFrom and invoiceDateTo as query params."""
+- "Faktura kan ikke opprettes" → order is missing orderlines
+- "Oppgitt prosjektleder har ikke fått tilgang" → employee needs userType="EXTENDED", create a new one
+- "Verdien er ikke av korrekt type" for userType → only "STANDARD", "EXTENDED", "NO_ACCESS" are valid
+- "Numm..." for departmentNumber → use unique incrementing numbers
+- GET /invoice REQUIRES invoiceDateFrom and invoiceDateTo query params"""
 
 
 # === ENDPOINTS ===
@@ -230,7 +298,6 @@ def health():
 @app.post("/solve")
 @app.post("/")
 async def solve(request: Request):
-    global _tx_session, _tx_base_url, _call_count, _error_count
     start_time = time.time()
 
     body = await request.json()
@@ -241,39 +308,54 @@ async def solve(request: Request):
     log.info(f"{'='*60}")
     log.info(f"PROMPT: {prompt[:500]}")
 
-    # Setup Tripletex session
-    _tx_base_url = creds["base_url"].rstrip("/")
-    _tx_session = requests.Session()
-    _tx_session.auth = ("0", creds["session_token"])
-    _tx_session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
-    _call_count = 0
-    _error_count = 0
+    # Thread-safe: store state in thread-local
+    ctx = {
+        "base_url": creds["base_url"].rstrip("/"),
+        "session": requests.Session(),
+        "call_count": 0,
+        "error_count": 0,
+    }
+    ctx["session"].auth = ("0", creds["session_token"])
+    ctx["session"].headers.update({"Content-Type": "application/json", "Accept": "application/json"})
+    _local.ctx = ctx
 
     # Decode vedlegg
     file_contents = []
     for f in files:
         data = base64.b64decode(f["content_base64"])
         filename = f["filename"]
-        filepath = Path(f"/tmp/{filename}")
-        filepath.write_bytes(data)
         mime = f.get("mime_type", "")
 
         if mime.startswith("text") or filename.endswith((".csv", ".json", ".txt")):
             try:
-                file_contents.append(f"File '{filename}':\n{data.decode('utf-8')[:3000]}")
+                file_contents.append(f"File '{filename}':\n{data.decode('utf-8')[:4000]}")
             except UnicodeDecodeError:
                 file_contents.append(f"File '{filename}': [binary, {len(data)} bytes]")
         elif mime == "application/pdf" or filename.endswith(".pdf"):
-            # Raw text extraction from PDF
-            text = data.decode("latin-1", errors="ignore")
-            readable = re.findall(r'[\w\s@.,;:!?/\\()-]{4,}', text)
-            extracted = " ".join(readable)[:2000]
+            extracted = extract_pdf_text(data)
             if extracted.strip():
                 file_contents.append(f"PDF '{filename}':\n{extracted}")
             else:
-                file_contents.append(f"PDF '{filename}': [{len(data)} bytes]")
+                file_contents.append(f"PDF '{filename}': [could not extract text, {len(data)} bytes]")
         elif mime.startswith("image/"):
-            file_contents.append(f"Image '{filename}': [{mime}, {len(data)} bytes — use info from prompt text]")
+            # Send image to Gemini vision for OCR
+            try:
+                vision_resp = gemini_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        {"text": "Extract ALL text, numbers, dates, names, amounts, and addresses from this image. Return the extracted data as structured text."},
+                        {"inline_data": {"mime_type": mime, "data": base64.b64encode(data).decode()}},
+                    ],
+                    config=GenerateContentConfig(temperature=0.0, max_output_tokens=2000),
+                )
+                ocr_text = vision_resp.text if vision_resp.text else ""
+                if ocr_text:
+                    file_contents.append(f"Image '{filename}' (OCR extracted):\n{ocr_text[:3000]}")
+                else:
+                    file_contents.append(f"Image '{filename}': [could not extract text]")
+            except Exception as e:
+                log.warning(f"Vision OCR failed for {filename}: {e}")
+                file_contents.append(f"Image '{filename}': [{mime}, {len(data)} bytes — OCR failed]")
         else:
             file_contents.append(f"File '{filename}': [{mime}, {len(data)} bytes]")
 
@@ -283,7 +365,6 @@ async def solve(request: Request):
         user_msg += "\n\nAttached files:\n" + "\n---\n".join(file_contents)
 
     try:
-        # Call Gemini with function calling — it will call Tripletex API directly
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=user_msg,
@@ -291,21 +372,21 @@ async def solve(request: Request):
                 system_instruction=SYSTEM_PROMPT,
                 tools=[tripletex_get, tripletex_post, tripletex_put, tripletex_delete],
                 automatic_function_calling=AutomaticFunctionCallingConfig(
-                    maximum_remote_calls=25,
+                    maximum_remote_calls=30,
                 ),
                 temperature=0.1,
-                max_output_tokens=2048,
+                max_output_tokens=4096,
             ),
         )
-        log.info(f"Gemini response: {response.text[:200] if response.text else 'no text'}")
-        log.info(f"API calls: {_call_count}, errors: {_error_count}")
+        log.info(f"Gemini response: {response.text[:300] if response.text else 'no text'}")
+        log.info(f"API calls: {ctx['call_count']}, errors: {ctx['error_count']}")
 
     except Exception as e:
         log.error(f"Agent error: {e}")
         log.error(traceback.format_exc())
 
     elapsed = time.time() - start_time
-    log.info(f"=== DONE in {elapsed:.1f}s (calls={_call_count}, errors={_error_count}) ===")
+    log.info(f"=== DONE in {elapsed:.1f}s (calls={ctx['call_count']}, errors={ctx['error_count']}) ===")
 
     # Log submission
     try:
@@ -313,8 +394,8 @@ async def solve(request: Request):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "prompt_preview": prompt[:200],
             "files_count": len(files),
-            "api_calls": _call_count,
-            "api_errors": _error_count,
+            "api_calls": ctx["call_count"],
+            "api_errors": ctx["error_count"],
             "elapsed_seconds": round(elapsed, 1),
         }
         with open(SUBMISSION_LOG_PATH, "a") as f:
