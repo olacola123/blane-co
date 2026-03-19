@@ -1,4 +1,4 @@
-# Oppgave 2 — Joakim
+# Oppgave 2: Tripletex Agent — Joakim
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

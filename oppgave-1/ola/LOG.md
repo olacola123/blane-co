@@ -1,4 +1,4 @@
-# Oppgave 1 — Ola
+# Oppgave 1: Object Detection — Ola
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

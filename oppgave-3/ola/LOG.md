@@ -1,4 +1,4 @@
-# Oppgave 3 — Ola
+# Oppgave 3: Astar Island — Ola
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

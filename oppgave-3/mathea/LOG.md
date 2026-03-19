@@ -1,4 +1,4 @@
-# Oppgave 3 — Mathea
+# Oppgave 3: Astar Island — Mathea
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

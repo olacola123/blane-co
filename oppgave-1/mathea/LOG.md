@@ -1,4 +1,4 @@
-# Oppgave 1 — Mathea
+# Oppgave 1: Object Detection — Mathea
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

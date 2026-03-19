@@ -1,4 +1,4 @@
-# Oppgave 1 — Joakim
+# Oppgave 1: Object Detection — Joakim
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

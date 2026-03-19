@@ -1,4 +1,4 @@
-# Oppgave 2 — Ola
+# Oppgave 2: Tripletex Agent — Ola
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

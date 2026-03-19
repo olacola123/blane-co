@@ -1,4 +1,4 @@
-# Oppgave 3 — Joakim
+# Oppgave 3: Astar Island — Joakim
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |

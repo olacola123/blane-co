@@ -1,4 +1,4 @@
-# Oppgave 2 — Mathea
+# Oppgave 2: Tripletex Agent — Mathea
 
 ## Hva jeg har prøvd
 | # | Tilnærming | Score | Beholdt? | Notater |
