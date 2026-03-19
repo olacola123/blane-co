@@ -81,4 +81,4 @@ class SolverConfig:
     local_dynamics_passes: int = 2
     latent_strength: float = 0.65
     log_level: str = "INFO"
-    history_root: str = "oppgave-3/joakim/history"
+    history_root: str = "oppgave-3-astar-island/joakim/history"

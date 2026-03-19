@@ -50,7 +50,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--history-root",
         type=str,
-        default="oppgave-3/joakim/history",
+        default="oppgave-3-astar-island/joakim/history",
         help="Where to persist round artifacts",
     )
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
@@ -95,7 +95,7 @@ def run(
     total_queries: int | None = None,
     prob_floor: float = 0.01,
     temperature: float = 1.0,
-    history_root: str = "oppgave-3/joakim/history",
+    history_root: str = "oppgave-3-astar-island/joakim/history",
     submit: bool = True,
     fetch_analysis_only: bool = False,
     dry_run: bool = False,
