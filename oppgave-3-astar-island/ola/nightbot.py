@@ -53,6 +53,7 @@ PROJECT_DIR = Path(__file__).parent
 STATE_FILE = PROJECT_DIR / "nightbot_state.json"
 LOG_FILE = PROJECT_DIR / "nightbot.log"
 CALIBRATION_FILE = PROJECT_DIR / "calibration_data.json"
+HISTORY_DIR = PROJECT_DIR / "round_history"
 
 API_KEY = os.environ.get("API_KEY", "")
 
@@ -69,6 +70,22 @@ def load_state():
             pass
     return {"solved_rounds": [], "scores": {}, "calibrated_rounds": [],
             "total_rounds_solved": 0}
+
+
+def save_round_data(round_id, round_number, data_type, data):
+    """Lagre data per runde i round_history/runde_N/."""
+    round_dir = HISTORY_DIR / f"runde_{round_number}"
+    round_dir.mkdir(parents=True, exist_ok=True)
+    filepath = round_dir / f"{data_type}.json"
+
+    # For numpy arrays, konverter til liste
+    if isinstance(data, np.ndarray):
+        data = data.tolist()
+
+    try:
+        filepath.write_text(json.dumps(data, indent=2, default=str))
+    except Exception as e:
+        logger.warning(f"Kunne ikke lagre {data_type}: {e}")
 
 
 def save_state(state):
@@ -218,7 +235,7 @@ def update_alpha(state, prior_avg, obs_avg):
 
 def solve_round_two_pass(client, round_id, round_data, transition_table, simple_prior):
     """
-    To-pass strategi:
+    To-pass strategi med full datalogging.
     1. Submit prior-only umiddelbart (sikkerhetsnett)
     2. Observer, blend, resubmit
     """
@@ -370,6 +387,48 @@ def solve_round_two_pass(client, round_id, round_data, transition_table, simple_
         pri_avg = sum(pri_scores) / len(pri_scores)
         update_alpha(state={}, prior_avg=pri_avg, obs_avg=obs_avg)
 
+    # === LAGRE ALL DATA ===
+    rnum = round_data.get("round_number", "?")
+    try:
+        # Observasjoner og prediksjoner per seed
+        for seed_idx, obs in enumerate(observers):
+            save_round_data(round_id, rnum, f"seed_{seed_idx}_counts", obs.counts)
+            save_round_data(round_id, rnum, f"seed_{seed_idx}_observed", obs.observed)
+            pred = obs.build_prediction(apply_smoothing=True)
+            save_round_data(round_id, rnum, f"seed_{seed_idx}_prediction", pred)
+
+        # Rundetype-faktorer
+        save_round_data(round_id, rnum, "round_factors", factors)
+
+        # Cross-seed tabell
+        if cross_table:
+            save_round_data(round_id, rnum, "cross_seed_table", cross_table)
+
+        # Resultater
+        save_round_data(round_id, rnum, "results", {
+            "round_id": round_id,
+            "round_number": rnum,
+            "alpha_used": alpha,
+            "prior_scores": prior_scores,
+            "obs_scores": [r.get("score") for r in results],
+            "results": results,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        # Settlement-attributter fra observasjoner
+        all_settlements = []
+        for seed_idx in range(n_seeds):
+            seed = seeds_data[seed_idx]
+            all_settlements.append({
+                "seed": seed_idx,
+                "initial_settlements": seed.get("settlements", []),
+            })
+        save_round_data(round_id, rnum, "settlements", all_settlements)
+
+        logger.info(f"  Data lagret i round_history/runde_{rnum}/")
+    except Exception as e:
+        logger.warning(f"  Datalogging feilet: {e}")
+
     return results
 
 
@@ -402,12 +461,16 @@ def recalibrate(client, state):
                 try:
                     analysis = client.get(f"/analysis/{rid}/{si}")
                     gt = analysis.get("ground_truth")
+                    score = analysis.get("score", "?")
                     if gt:
                         new_entries.append({
                             "initial_grid": seeds[si].get("grid", []),
                             "settlements": seeds[si].get("settlements", []),
                             "ground_truth": gt,
                         })
+                        # Lagre ground truth
+                        save_round_data(rid, rnum, f"seed_{si}_ground_truth", gt)
+                        save_round_data(rid, rnum, f"seed_{si}_analysis_score", score)
                 except Exception:
                     pass
                 time.sleep(0.3)
