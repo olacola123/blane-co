@@ -93,9 +93,9 @@ class ProbabilisticMapPredictor:
         )
         base = (1.0 - dynamic_mass[..., None]) * static_component + dynamic_mass[..., None] * dynamic_component
         refined = self.local_refiner.refine(base, feature_grid, relations, latent)
-        blended, observation_weight = self._blend_observations(refined, seed_observation)
-        calibrated = self._apply_calibration(blended)
-        final = apply_probability_floor(calibrated, self.config.probability.floor)
+        calibrated_prior = self._apply_calibration(refined)
+        blended, observation_weight = self._blend_observations(calibrated_prior, seed_observation)
+        final = self._apply_output_floor(blended, feature_grid, seed_observation)
         entropy = predictive_entropy(final)
 
         self.logger.info(
@@ -132,9 +132,9 @@ class ProbabilisticMapPredictor:
         static = np.full(features.channels.shape[:2] + (6,), 1e-6, dtype=float)
         static[..., 0] = (
             self.config.model.geography_prior_strength * shared_strength * shared_prior[..., 0]
-            + 3.0 * plains_like
-            + 0.9 * features.channel("distance_settlement_norm")
-            + 0.6 * (1.0 - coastal)
+            + 1.1 * plains_like
+            + 0.4 * features.channel("distance_settlement_norm")
+            + 0.2 * (1.0 - coastal)
             + 0.4 * (1.0 - settlement_landmass)
         )
         static[..., 1] = (
@@ -155,9 +155,9 @@ class ProbabilisticMapPredictor:
         static[..., 4] = (
             0.95 * self.config.model.geography_prior_strength * shared_strength * shared_prior[..., 4]
             + 2.4 * forest
-            + 0.9 * features.channel("forest_adj")
-            + 0.6 * features.channel("local_forest_density")
-            + 0.2 * (1.0 - features.channel("settlement_proximity"))
+            + 1.2 * features.channel("forest_adj")
+            + 0.7 * features.channel("local_forest_density")
+            + 0.4 * (1.0 - features.channel("settlement_proximity"))
         )
         static[..., 5] = (
             1.2 * self.config.model.geography_prior_strength * shared_strength * shared_prior[..., 5]
@@ -310,10 +310,10 @@ class ProbabilisticMapPredictor:
 
         dynamic = np.full(features.channels.shape[:2] + (6,), 1e-6, dtype=float)
         dynamic[..., 0] = (
-            1.0
+            0.45
             + 1.8 * shared_prior[..., 0]
-            + 1.0 * features.channel("plains_like")
-            + 0.35 * features.channel("distance_mountain_norm")
+            + 0.40 * features.channel("plains_like")
+            + 0.15 * features.channel("distance_mountain_norm")
             + 0.35 * (1.0 - settlement_gate)
             + 0.30 * (1.0 - port_gate)
             + 0.25 * (1.0 - ruin_gate)
@@ -360,14 +360,14 @@ class ProbabilisticMapPredictor:
         )
         dynamic[..., 4] = (
             0.10
-            + 3.0
+            + 4.2
             * forest_gate
             * (
-                0.30
-                + 0.24 * features.channel("local_forest_density")
-                + 0.12 * frontier_focus
-                + 0.12 * shared_prior[..., 4]
-                + latent_scale * 0.18 * latent.reclaim_tendency
+                0.38
+                + 0.34 * features.channel("local_forest_density")
+                + 0.16 * frontier_focus
+                + 0.16 * shared_prior[..., 4]
+                + latent_scale * 0.22 * latent.reclaim_tendency
             )
         )
         dynamic[..., 5] = 3.0 * features.channel("terrain_mountain") + 0.02
@@ -415,12 +415,26 @@ class ProbabilisticMapPredictor:
         prediction: np.ndarray,
         seed_observation,
     ) -> tuple[np.ndarray, np.ndarray]:
+        # Treat direct observations as the strongest signal and reduce the pseudo-count
+        # sharply once a cell has actually been seen.
+        observed = seed_observation.observed.astype(float)
+        effective_prior_strength = np.full(
+            observed.shape,
+            float(self.config.model.observation_prior_strength),
+            dtype=float,
+        )
+        effective_prior_strength = np.where(observed >= 1, 0.85, effective_prior_strength)
+        effective_prior_strength = np.where(observed >= 2, 0.35, effective_prior_strength)
+        effective_prior_strength = np.where(observed >= 3, 0.15, effective_prior_strength)
         posterior = seed_observation.posterior(
             prediction,
-            prior_strength=self.config.model.observation_prior_strength,
+            prior_strength=effective_prior_strength,
         )
-        observed = seed_observation.observed.astype(float)
-        observation_weight = observed / (observed + self.config.model.observation_prior_strength)
+        observation_weight = np.where(
+            observed > 0.0,
+            observed / (observed + effective_prior_strength),
+            0.0,
+        )
         return posterior, observation_weight
 
     def _apply_calibration(self, probabilities: np.ndarray) -> np.ndarray:
@@ -448,3 +462,24 @@ class ProbabilisticMapPredictor:
             enable_temperature_scaling=self.config.probability.enable_temperature_scaling,
             enable_class_calibration=self.config.probability.enable_class_calibration,
         )
+
+    def _apply_output_floor(
+        self,
+        probabilities: np.ndarray,
+        features: FeatureGrid,
+        seed_observation,
+    ) -> np.ndarray:
+        base_floor = float(self.config.probability.floor)
+        sharp_floor = min(float(self.config.probability.sharp_floor), base_floor)
+        if sharp_floor <= 0.0 or np.isclose(sharp_floor, base_floor):
+            return apply_probability_floor(probabilities, base_floor)
+
+        confidence_threshold = float(self.config.probability.sharp_floor_threshold)
+        max_probability = probabilities.max(axis=-1)
+        observed_mask = seed_observation.observed > 0
+        static_mask = (features.channel("terrain_ocean") > 0.5) | (features.channel("terrain_mountain") > 0.5)
+        confident_mask = static_mask | observed_mask | (max_probability >= confidence_threshold)
+
+        floor_map = np.full(probabilities.shape[:2], base_floor, dtype=float)
+        floor_map[confident_mask] = sharp_floor
+        return apply_probability_floor(probabilities, floor_map)

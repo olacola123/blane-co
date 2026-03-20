@@ -28,6 +28,17 @@ class ProbabilityTests(unittest.TestCase):
         self.assertTrue(np.all(floored >= 0.01 - 1e-9))
         self.assertTrue(np.allclose(floored.sum(axis=-1), 1.0))
 
+    def test_probability_floor_accepts_per_cell_floor_map(self) -> None:
+        probabilities = np.zeros((1, 2, 6), dtype=float)
+        probabilities[0, 0, 0] = 1.0
+        probabilities[0, 1, 5] = 1.0
+
+        floored = apply_probability_floor(probabilities, eps=np.array([[0.01, 0.001]], dtype=float))
+
+        self.assertAlmostEqual(float(floored[0, 0, 0]), 0.95, places=9)
+        self.assertAlmostEqual(float(floored[0, 1, 5]), 0.995, places=9)
+        self.assertTrue(np.allclose(floored.sum(axis=-1), 1.0))
+
     def test_temperature_scaling_preserves_simplex(self) -> None:
         probabilities = np.array([[[0.60, 0.15, 0.10, 0.08, 0.04, 0.03]]], dtype=float)
 

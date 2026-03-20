@@ -10,6 +10,8 @@ class ProbabilityConfig:
     """Numerical controls for calibrated probabilistic outputs."""
 
     floor: float = 0.01
+    sharp_floor: float = 0.001
+    sharp_floor_threshold: float = 0.985
     temperature: float = 1.0
     enable_temperature_scaling: bool = True
     enable_class_calibration: bool = True
@@ -63,11 +65,12 @@ class QueryConfig:
     frontier_weight: float = 0.85
     repeat_value_weight: float = 0.55
     coverage_penalty: float = 0.35
-    duplicate_penalty: float = 0.35
+    duplicate_penalty: float = 0.15
     accidental_overlap_penalty: float = 0.95
     deliberate_repeat_after: int = 4
     repeat_target_coverage: float = 2.0
     max_repeat_share: float = 0.22
+    revisit_weight: float = 0.9
     candidate_limit: int = 36
 
 

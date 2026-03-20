@@ -136,6 +136,18 @@ class RoundDatasetStore:
         manifest_path.write_text(json.dumps(manifest, indent=2))
         return manifest_path
 
+    def update_round_diagnostics(self, round_id: str, diagnostics: dict[str, Any]) -> Path:
+        """Merge computed diagnostics into an existing stored round."""
+        round_dir = self.root / round_id
+        manifest_path = round_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        existing = manifest.get("diagnostics", {})
+        for key, value in diagnostics.items():
+            existing[key] = value
+        manifest["diagnostics"] = existing
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        return manifest_path
+
     def build_training_examples(self, round_id: str) -> list[dict[str, Any]]:
         """Turn one stored round into per-seed training examples when labels exist."""
         bundle = self.load_round(round_id)

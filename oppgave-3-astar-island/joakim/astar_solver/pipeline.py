@@ -194,7 +194,7 @@ class RoundSolver:
                 last_error = exc
                 response = getattr(exc, "response", None)
                 status_code = getattr(response, "status_code", None)
-                if status_code not in {404, 409, 425, 429}:
+                if status_code not in {400, 404, 409, 425, 429}:
                     response_text = ""
                     if response is not None:
                         try:

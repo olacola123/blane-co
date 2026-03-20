@@ -56,6 +56,37 @@ class HistoryTests(unittest.TestCase):
             saved = np.load(round_dir.parent / updated["ground_truth"]["0"])
             self.assertEqual(saved.shape, (40, 40, 6))
 
+    def test_update_round_diagnostics_merges_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            round_dir = root / "round-1"
+            round_dir.mkdir(parents=True)
+            manifest_path = round_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "round_id": "round-1",
+                        "diagnostics": {
+                            "query": {"queries_per_seed": {"0": 6}},
+                        },
+                    }
+                )
+            )
+
+            store = RoundDatasetStore(root)
+            store.update_round_diagnostics(
+                "round-1",
+                {
+                    "analysis": {"0": {"weighted_kl": 0.12}},
+                    "analysis_summary": {"mean_weighted_kl": 0.12},
+                },
+            )
+
+            updated = json.loads(manifest_path.read_text())
+            self.assertIn("query", updated["diagnostics"])
+            self.assertIn("analysis", updated["diagnostics"])
+            self.assertIn("analysis_summary", updated["diagnostics"])
+
 
 if __name__ == "__main__":
     unittest.main()

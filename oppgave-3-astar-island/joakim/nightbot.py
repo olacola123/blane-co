@@ -16,12 +16,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -30,16 +30,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 # Ensure the solver package is importable
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from astar_solver import AstarClient, RoundSolver, SolverConfig
+from astar_solver import RoundSolver, SolverConfig
 from astar_solver.constants import DEFAULT_TOTAL_QUERIES
-from astar_solver.evaluation import calibration_diagnostics, weighted_kl
+from astar_solver.evaluation import (
+    bucketed_error_diagnostics,
+    calibration_diagnostics,
+    classwise_expected_calibration_error,
+)
+from astar_solver.features import MapFeatureExtractor
 from astar_solver.history import RoundDatasetStore
+from astar_solver.tuning import extract_target_tensor
+from astar_solver.types import SeedState
+
+if TYPE_CHECKING:
+    from astar_solver import AstarClient as AstarClientType
 
 HISTORY_ROOT = str(PROJECT_ROOT / "history")
 STATE_FILE = PROJECT_ROOT / "nightbot_state.json"
 DIAGNOSTICS_LOG = PROJECT_ROOT / "nightbot_diagnostics.jsonl"
 
 logger = logging.getLogger("nightbot")
+TRANSIENT_ANALYSIS_STATUS_CODES = {400, 404, 409, 425, 429}
+AstarClient = None
+
+
+def _build_client() -> "AstarClientType":
+    """Create the API client lazily so tests can import this module without requests installed."""
+    global AstarClient
+    if AstarClient is None:
+        from astar_solver import AstarClient as client_cls
+
+        AstarClient = client_cls
+    return AstarClient()
 
 
 def load_state() -> dict:
@@ -59,8 +81,74 @@ def log_diagnostics(entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def bootstrap_state_from_history(history_store: RoundDatasetStore, state: dict) -> dict:
+    """Reconcile state with locally stored round history."""
+    bootstrapped = {
+        "solved_rounds": list(state.get("solved_rounds", [])),
+        "pending_analysis": list(state.get("pending_analysis", [])),
+        "round_scores": dict(state.get("round_scores", {})),
+    }
+    solved_rounds = set(bootstrapped["solved_rounds"])
+    pending_by_round = {
+        str(item.get("round_id")): dict(item)
+        for item in bootstrapped["pending_analysis"]
+        if item.get("round_id")
+    }
+
+    if not history_store.root.exists():
+        bootstrapped["solved_rounds"] = sorted(solved_rounds)
+        bootstrapped["pending_analysis"] = list(pending_by_round.values())
+        return bootstrapped
+
+    for round_dir in sorted(path for path in history_store.root.iterdir() if path.is_dir()):
+        manifest_path = round_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except Exception as exc:
+            logger.warning("Skipping unreadable history manifest %s: %s", manifest_path, exc)
+            continue
+
+        round_id = str(manifest.get("round_id") or round_dir.name)
+        seed_count = len(manifest.get("initial_states", []))
+        submissions = manifest.get("submission_responses", {})
+        analyses = manifest.get("analyses", {})
+        ground_truth = manifest.get("ground_truth", {})
+        diagnostics = manifest.get("diagnostics", {})
+
+        fully_submitted = seed_count > 0 and len(submissions) >= seed_count
+        fully_analyzed = seed_count > 0 and max(len(analyses), len(ground_truth)) >= seed_count
+
+        if fully_submitted:
+            solved_rounds.add(round_id)
+            if not fully_analyzed:
+                pending_by_round[round_id] = {
+                    "round_id": round_id,
+                    "seed_count": seed_count,
+                    "submitted_at": manifest.get("saved_at_utc", ""),
+                }
+            elif round_id in pending_by_round:
+                del pending_by_round[round_id]
+
+        analysis_summary = diagnostics.get("analysis_summary")
+        if (
+            isinstance(analysis_summary, dict)
+            and analysis_summary
+            and (analysis_summary.get("analysis_complete") is True or fully_analyzed)
+        ):
+            bootstrapped["round_scores"][round_id] = analysis_summary
+
+    bootstrapped["solved_rounds"] = sorted(solved_rounds)
+    bootstrapped["pending_analysis"] = sorted(
+        pending_by_round.values(),
+        key=lambda item: str(item.get("submitted_at", "")),
+    )
+    return bootstrapped
+
+
 def fetch_and_score_analyses(
-    client: AstarClient,
+    client: "AstarClientType",
     history_store: RoundDatasetStore,
     round_id: str,
     seed_count: int,
@@ -80,32 +168,83 @@ def fetch_and_score_analyses(
                 analysis = client.get_analysis(round_id, seed_index)
                 analyses[seed_index] = analysis
                 logger.info("Got analysis for seed %d", seed_index)
-            except Exception:
-                pass
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if status_code not in TRANSIENT_ANALYSIS_STATUS_CODES:
+                    logger.warning(
+                        "Analysis fetch failed for round %s seed %d status=%s error=%s",
+                        round_id[:12],
+                        seed_index,
+                        status_code,
+                        exc,
+                    )
 
         if len(analyses) == seed_count:
             break
         time.sleep(poll_interval)
 
-    if not analyses:
+    stored_analyses: dict[int, dict] = {}
+    if analyses:
+        history_store.update_round_analyses(round_id, analyses)
+    round_bundle = history_store.load_round(round_id)
+    stored_analyses = {
+        int(seed_key): payload
+        for seed_key, payload in round_bundle["manifest"].get("analyses", {}).items()
+    }
+
+    if not stored_analyses:
         logger.warning("No analyses available for round %s", round_id[:12])
         return None
 
-    # Update stored history with analyses
-    history_store.update_round_analyses(round_id, analyses)
-
-    # Compute diagnostics from stored predictions vs ground truth
-    diagnostics = compute_round_diagnostics(history_store, round_id, analyses)
+    diagnostics = compute_round_diagnostics(history_store, round_id)
+    history_store.update_round_diagnostics(
+        round_id,
+        {
+            "analysis": diagnostics.get("seeds", {}),
+            "analysis_summary": diagnostics.get("summary", {}),
+        },
+    )
     return diagnostics
+
+
+def _seed_states_from_bundle(bundle: dict) -> dict[int, SeedState]:
+    """Rebuild typed seed states from a stored round bundle."""
+    seed_states: dict[int, SeedState] = {}
+    manifest = bundle["manifest"]
+    for item in manifest.get("initial_states", []):
+        seed_index = int(item["seed_index"])
+        grid = bundle["initial_grids"].get(seed_index)
+        if grid is None:
+            continue
+        seed_states[seed_index] = SeedState.from_round_data(
+            seed_index=seed_index,
+            seed_data={
+                "grid": grid.tolist(),
+                "settlements": item.get("settlements", []),
+            },
+        )
+    return seed_states
 
 
 def compute_round_diagnostics(
     history_store: RoundDatasetStore,
     round_id: str,
-    analyses: dict,
+    analyses: dict | None = None,
 ) -> dict:
     """Compare predictions to ground truth and compute scoring metrics."""
-    round_dir = history_store.root / round_id
+    bundle = history_store.load_round(round_id)
+    if analyses is None:
+        analyses = {
+            int(seed_key): payload
+            for seed_key, payload in bundle["manifest"].get("analyses", {}).items()
+        }
+    seed_states = _seed_states_from_bundle(bundle)
+    feature_extractor = MapFeatureExtractor()
+    feature_cache = {
+        seed_index: feature_extractor.extract(seed_state)
+        for seed_index, seed_state in seed_states.items()
+    }
     diagnostics = {
         "round_id": round_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -114,28 +253,21 @@ def compute_round_diagnostics(
     }
 
     kl_values = []
+    expected_seed_count = len(bundle["manifest"].get("initial_states", []))
 
     for seed_index, analysis in analyses.items():
         seed_key = str(seed_index)
 
         # Load our prediction
-        prediction_path = round_dir / "arrays" / f"seed_{seed_index}_prediction.npy"
-        if not prediction_path.exists():
+        prediction = bundle["predictions"].get(seed_index)
+        if prediction is None:
             logger.warning("No prediction file for seed %d", seed_index)
             continue
 
-        prediction = np.load(prediction_path)
-
         # Extract ground truth from analysis
-        ground_truth = None
-        if "ground_truth" in analysis:
-            gt_raw = analysis["ground_truth"]
-            if isinstance(gt_raw, list):
-                ground_truth = np.array(gt_raw, dtype=np.float64)
-        elif "actual_distribution" in analysis:
-            gt_raw = analysis["actual_distribution"]
-            if isinstance(gt_raw, list):
-                ground_truth = np.array(gt_raw, dtype=np.float64)
+        ground_truth = extract_target_tensor(analysis)
+        if ground_truth is None:
+            ground_truth = bundle["ground_truth"].get(seed_index)
 
         seed_diag = {"seed_index": seed_index}
 
@@ -147,32 +279,44 @@ def compute_round_diagnostics(
 
         # Compute our own metrics if we have ground truth
         if ground_truth is not None and ground_truth.shape == prediction.shape:
-            # Save ground truth for future training
-            gt_path = round_dir / "arrays" / f"seed_{seed_index}_ground_truth.npy"
-            np.save(gt_path, ground_truth)
-
             diag = calibration_diagnostics(ground_truth, prediction)
             seed_diag["weighted_kl"] = diag.weighted_kl_value
             seed_diag["nll"] = diag.nll
             seed_diag["brier"] = diag.brier
             seed_diag["ece"] = diag.ece
+            seed_diag["classwise_ece"] = classwise_expected_calibration_error(ground_truth, prediction)
+            if seed_index in feature_cache:
+                seed_diag["bucketed_kl"] = bucketed_error_diagnostics(
+                    ground_truth,
+                    prediction,
+                    feature_cache[seed_index],
+                )
             kl_values.append(diag.weighted_kl_value)
 
         diagnostics["seeds"][seed_key] = seed_diag
 
+    diagnostics["summary"] = {
+        "expected_seed_count": expected_seed_count,
+        "num_analysis_payloads": len(analyses),
+        "num_ground_truth_tensors": len(bundle["ground_truth"]),
+        "analysis_complete": expected_seed_count > 0 and len(analyses) >= expected_seed_count,
+    }
+
     if kl_values:
-        diagnostics["summary"] = {
+        diagnostics["summary"].update(
+            {
             "mean_weighted_kl": float(np.mean(kl_values)),
             "std_weighted_kl": float(np.std(kl_values)),
             "min_weighted_kl": float(np.min(kl_values)),
             "max_weighted_kl": float(np.max(kl_values)),
             "num_seeds_scored": len(kl_values),
-        }
+            }
+        )
 
     return diagnostics
 
 
-def get_new_round(client: AstarClient, solved_rounds: list[str]) -> tuple[str, dict] | None:
+def get_new_round(client: "AstarClientType", solved_rounds: list[str]) -> tuple[str, dict] | None:
     """Check for a round we haven't solved yet. Returns (round_id, round_data) or None."""
     try:
         rounds = client.get_rounds()
@@ -183,21 +327,46 @@ def get_new_round(client: AstarClient, solved_rounds: list[str]) -> tuple[str, d
     if not rounds:
         return None
 
-    for round_info in reversed(rounds):
+    solved_set = set(solved_rounds)
+    highest_known_round_number = -1
+    for round_info in rounds:
+        if not isinstance(round_info, dict):
+            continue
+        round_id = str(round_info.get("id", ""))
+        if round_id not in solved_set:
+            continue
+        round_number = round_info.get("round_number")
+        if isinstance(round_number, int):
+            highest_known_round_number = max(highest_known_round_number, round_number)
+
+    def round_sort_key(round_info) -> tuple[int, str]:
+        if not isinstance(round_info, dict):
+            return (-1, str(round_info))
+        round_number = round_info.get("round_number")
+        if not isinstance(round_number, int):
+            round_number = -1
+        tie_breaker = str(round_info.get("started_at") or round_info.get("event_date") or "")
+        return (round_number, tie_breaker)
+
+    for round_info in sorted(rounds, key=round_sort_key, reverse=True):
         round_id = round_info["id"] if isinstance(round_info, dict) else round_info
-        if round_id not in solved_rounds:
-            try:
-                round_data = client.get_round(round_id)
-                return round_id, round_data
-            except Exception as exc:
-                logger.error("Failed to fetch round %s: %s", round_id[:12], exc)
-                return None
+        if round_id in solved_set:
+            continue
+        round_number = round_info.get("round_number") if isinstance(round_info, dict) else None
+        if isinstance(round_number, int) and round_number <= highest_known_round_number:
+            continue
+        try:
+            round_data = client.get_round(round_id)
+            return round_id, round_data
+        except Exception as exc:
+            logger.error("Failed to fetch round %s: %s", round_id[:12], exc)
+            return None
 
     return None
 
 
 def solve_round(
-    client: AstarClient,
+    client: "AstarClientType",
     round_id: str,
     round_data: dict,
     dry_run: bool = False,
@@ -233,9 +402,11 @@ def solve_round(
 
 
 def try_fetch_pending_analyses(
-    client: AstarClient,
+    client: "AstarClientType",
     state: dict,
     history_store: RoundDatasetStore,
+    timeout: float = 60.0,
+    poll_interval: float = 10.0,
 ) -> None:
     """Try to fetch analyses for rounds that were solved but not yet analyzed."""
     still_pending = []
@@ -252,11 +423,12 @@ def try_fetch_pending_analyses(
             history_store=history_store,
             round_id=round_id,
             seed_count=seed_count,
-            timeout=60.0,  # Short timeout for pending checks
-            poll_interval=10.0,
+            timeout=timeout,
+            poll_interval=poll_interval,
         )
 
-        if diagnostics and diagnostics.get("seeds"):
+        analysis_complete = bool(diagnostics and diagnostics.get("summary", {}).get("analysis_complete"))
+        if diagnostics and diagnostics.get("seeds") and analysis_complete:
             log_diagnostics(diagnostics)
             state["round_scores"][round_id] = diagnostics.get("summary", {})
             logger.info(
@@ -266,7 +438,15 @@ def try_fetch_pending_analyses(
             )
         else:
             still_pending.append(pending)
-            logger.info("Analysis not yet available for round %s", round_id[:12])
+            if diagnostics and diagnostics.get("seeds"):
+                logger.info(
+                    "Partial analysis for round %s: %s/%s payloads available",
+                    round_id[:12],
+                    diagnostics["summary"].get("num_analysis_payloads", 0),
+                    diagnostics["summary"].get("expected_seed_count", seed_count),
+                )
+            else:
+                logger.info("Analysis not yet available for round %s", round_id[:12])
 
     state["pending_analysis"] = still_pending
 
@@ -278,10 +458,16 @@ def run_nightbot(
     max_rounds: int = 0,
 ) -> None:
     """Main bot loop."""
-    client = AstarClient()
+    client = _build_client()
     history_store = RoundDatasetStore(HISTORY_ROOT)
-    state = load_state()
+    loaded_state = load_state()
+    state = bootstrap_state_from_history(history_store, loaded_state)
+    if state != loaded_state:
+        save_state(state)
     rounds_solved = 0
+    known_rounds = set(state["solved_rounds"])
+    pending_timeout = min(60.0, max(float(poll_interval) / 2.0, 15.0))
+    pending_poll_interval = min(10.0, max(pending_timeout / 6.0, 1.0))
 
     logger.info("=== Nightbot started ===")
     logger.info("Poll interval: %ds | Analysis wait: %ds | Dry run: %s", poll_interval, analysis_wait, dry_run)
@@ -292,11 +478,17 @@ def run_nightbot(
         try:
             # 1. Check for pending analyses from previous rounds
             if state.get("pending_analysis"):
-                try_fetch_pending_analyses(client, state, history_store)
+                try_fetch_pending_analyses(
+                    client,
+                    state,
+                    history_store,
+                    timeout=pending_timeout,
+                    poll_interval=pending_poll_interval,
+                )
                 save_state(state)
 
             # 2. Check for a new round to solve
-            new = get_new_round(client, state["solved_rounds"])
+            new = get_new_round(client, list(known_rounds))
 
             if new is not None:
                 round_id, round_data = new
@@ -304,22 +496,77 @@ def run_nightbot(
 
                 try:
                     artifacts = solve_round(client, round_id, round_data, dry_run=dry_run)
+                    known_rounds.add(round_id)
 
-                    state["solved_rounds"].append(round_id)
+                    if not dry_run:
+                        if round_id not in state["solved_rounds"]:
+                            state["solved_rounds"].append(round_id)
 
-                    # Count seeds for analysis polling
-                    seed_payloads = round_data.get("seeds", round_data.get("initial_states", []))
-                    seed_count = len(seed_payloads)
+                        # Count seeds for analysis polling
+                        seed_payloads = round_data.get("seeds", round_data.get("initial_states", []))
+                        seed_count = len(seed_payloads)
 
-                    state["pending_analysis"].append({
-                        "round_id": round_id,
-                        "seed_count": seed_count,
-                        "submitted_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    save_state(state)
+                        pending_entry = {
+                            "round_id": round_id,
+                            "seed_count": seed_count,
+                            "submitted_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        state["pending_analysis"] = [
+                            pending
+                            for pending in state.get("pending_analysis", [])
+                            if pending.get("round_id") != round_id
+                        ]
+                        state["pending_analysis"].append(pending_entry)
+                        save_state(state)
+
+                        if analysis_wait > 0:
+                            diagnostics = fetch_and_score_analyses(
+                                client=client,
+                                history_store=history_store,
+                                round_id=round_id,
+                                seed_count=seed_count,
+                                timeout=float(analysis_wait),
+                                poll_interval=min(10.0, max(float(analysis_wait) / 12.0, 1.0)),
+                            )
+                            analysis_complete = bool(
+                                diagnostics and diagnostics.get("summary", {}).get("analysis_complete")
+                            )
+                            if diagnostics and diagnostics.get("seeds") and analysis_complete:
+                                log_diagnostics(diagnostics)
+                                state["round_scores"][round_id] = diagnostics.get("summary", {})
+                                state["pending_analysis"] = [
+                                    pending
+                                    for pending in state.get("pending_analysis", [])
+                                    if pending.get("round_id") != round_id
+                                ]
+                                save_state(state)
+                                logger.info(
+                                    "Round %s diagnostics: %s",
+                                    round_id[:12],
+                                    json.dumps(diagnostics.get("summary", {}), indent=2),
+                                )
+                            elif diagnostics and diagnostics.get("seeds"):
+                                save_state(state)
+                                logger.info(
+                                    "Partial analysis for round %s: %s/%s payloads available",
+                                    round_id[:12],
+                                    diagnostics["summary"].get("num_analysis_payloads", 0),
+                                    diagnostics["summary"].get("expected_seed_count", seed_count),
+                                )
 
                     rounds_solved += 1
-                    logger.info("Round %s solved and submitted. Total solved this session: %d", round_id[:12], rounds_solved)
+                    if dry_run:
+                        logger.info(
+                            "Round %s dry-run completed. Total processed this session: %d",
+                            round_id[:12],
+                            rounds_solved,
+                        )
+                    else:
+                        logger.info(
+                            "Round %s solved and submitted. Total solved this session: %d",
+                            round_id[:12],
+                            rounds_solved,
+                        )
 
                     if max_rounds > 0 and rounds_solved >= max_rounds:
                         logger.info("Reached max rounds (%d). Stopping.", max_rounds)

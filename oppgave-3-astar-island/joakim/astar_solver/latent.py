@@ -96,6 +96,10 @@ class RoundLatentInferer:
             1.0,
         )
 
+        forest_boost = max(0.0, summary.forest_density - 0.15) * 2.0
+        expansion_pressure = float(np.clip(expansion_pressure - 0.4 * forest_boost, 0, 1))
+        reclaim_tendency = float(np.clip(reclaim_tendency + 0.5 * forest_boost, 0, 1))
+
         latent = RoundLatentState(
             expansion_pressure=float(expansion_pressure),
             winter_harshness=float(winter_harshness),

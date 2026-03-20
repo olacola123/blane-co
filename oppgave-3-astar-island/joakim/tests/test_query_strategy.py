@@ -84,6 +84,33 @@ class QueryStrategyTests(unittest.TestCase):
         self.assertGreater(candidate.repeat_value, 0.0)
         self.assertGreater(candidate.score, -5.0)
 
+    def test_adaptive_stage_scores_once_observed_dynamic_region_above_thrice_observed_region(self) -> None:
+        selector = HeuristicQuerySelector(QueryConfig())
+        artifacts = _dummy_artifacts()
+        coverage_once = np.zeros((40, 40), dtype=float)
+        coverage_thrice = np.zeros((40, 40), dtype=float)
+        coverage_once[15:26, 15:26] = 1.0
+        coverage_thrice[15:26, 15:26] = 3.0
+
+        candidate_once = selector._score_candidate(
+            viewport=Viewport.centered(20, 20, 11),
+            artifacts=artifacts,
+            coverage=coverage_once,
+            queries_used_for_seed=6,
+            stage="adaptive",
+            origin="revisit-test",
+        )
+        candidate_thrice = selector._score_candidate(
+            viewport=Viewport.centered(20, 20, 11),
+            artifacts=artifacts,
+            coverage=coverage_thrice,
+            queries_used_for_seed=6,
+            stage="adaptive",
+            origin="revisit-test",
+        )
+
+        self.assertGreater(candidate_once.score, candidate_thrice.score)
+
 
 if __name__ == "__main__":
     unittest.main()

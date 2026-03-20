@@ -22,15 +22,20 @@ def safe_normalize(
     return result / denom
 
 
-def apply_probability_floor(probabilities: np.ndarray, eps: float) -> np.ndarray:
+def apply_probability_floor(probabilities: np.ndarray, eps: float | np.ndarray) -> np.ndarray:
     """Centralized probability flooring followed by renormalization."""
     normalized = safe_normalize(probabilities, axis=-1)
     num_classes = normalized.shape[-1]
-    if eps < 0.0:
+    eps_array = np.asarray(eps, dtype=float)
+    if eps_array.ndim == 0:
+        eps_array = np.full(normalized.shape[:-1], float(eps_array), dtype=float)
+    elif eps_array.shape != normalized.shape[:-1]:
+        raise ValueError("eps must be a scalar or match probabilities.shape[:-1]")
+    if np.any(eps_array < 0.0):
         raise ValueError("eps must be non-negative")
-    if eps * num_classes >= 1.0:
+    if np.any(eps_array * num_classes >= 1.0):
         raise ValueError("eps is too large for the number of classes")
-    return normalized * (1.0 - eps * num_classes) + eps
+    return normalized * (1.0 - eps_array[..., None] * num_classes) + eps_array[..., None]
 
 
 def temperature_scale(

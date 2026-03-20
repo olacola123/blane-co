@@ -134,12 +134,17 @@ class SeedObservationGrid:
         freqs[~mask] = 1.0 / self.counts.shape[-1]
         return safe_normalize(freqs, axis=-1)
 
-    def posterior(self, prior: np.ndarray, prior_strength: float) -> np.ndarray:
+    def posterior(self, prior: np.ndarray, prior_strength: float | np.ndarray) -> np.ndarray:
         """Posterior class probabilities treating observations as stochastic samples."""
         if prior.shape != self.counts.shape:
             raise ValueError("prior must match the observation count tensor shape")
-        alpha = max(float(prior_strength), 0.0)
-        posterior_counts = self.counts + alpha * np.clip(prior, 1e-9, None)
+        alpha = np.asarray(prior_strength, dtype=float)
+        if alpha.ndim == 0:
+            alpha = np.full(self.observed.shape, float(alpha), dtype=float)
+        elif alpha.shape != self.observed.shape:
+            raise ValueError("prior_strength must be a scalar or match the observation grid shape")
+        alpha = np.maximum(alpha, 0.0)
+        posterior_counts = self.counts + alpha[..., None] * np.clip(prior, 1e-9, None)
         return safe_normalize(posterior_counts, axis=-1)
 
     def coverage_ratio(self) -> float:

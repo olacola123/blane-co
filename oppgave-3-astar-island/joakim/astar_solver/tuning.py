@@ -13,6 +13,9 @@ import numpy as np
 from .constants import GRID_SIZE, NUM_CLASSES, TERRAIN_TO_CLASS
 from .probability import safe_normalize
 
+# Set to 0.0 to disable history calibration until we have 5+ analyzed rounds.
+HISTORY_WEIGHT = 0.0
+
 
 @dataclass(slots=True)
 class HistoryCalibrationProfile:
@@ -141,6 +144,8 @@ class HistoryCalibrationTuner:
             0.70,
             1.45,
         )
+        bias = bias * HISTORY_WEIGHT
+        class_temperature = 1.0 + (class_temperature - 1.0) * HISTORY_WEIGHT
         self.logger.info(
             "Loaded historical calibration rounds=%s seeds=%s bias=%s temp=%s",
             rounds_used,

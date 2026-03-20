@@ -138,6 +138,15 @@ class HeuristicQuerySelector:
         repeat_priority = (repeat_window / max(self.config.repeat_target_coverage, 1e-6)) * (
             0.45 * artifacts.entropy_map + 0.35 * artifacts.dynamic_mass + 0.20 * frontier
         )
+        revisit_mask = ((coverage >= 1.0) & (coverage < self.config.repeat_target_coverage)).astype(float)
+        revisit_need = np.clip(
+            self.config.repeat_target_coverage - np.clip(coverage, 1.0, self.config.repeat_target_coverage),
+            0.0,
+            self.config.repeat_target_coverage,
+        )
+        revisit_priority = revisit_mask * revisit_need * (
+            0.45 * artifacts.entropy_map + 0.35 * artifacts.dynamic_mass + 0.20 * frontier
+        )
 
         anchor_maps: list[tuple[str, np.ndarray]] = [
             ("entropy", artifacts.entropy_map * (0.35 + 0.65 * coverage_need)),
@@ -146,6 +155,7 @@ class HeuristicQuerySelector:
         ]
         if stage == "adaptive":
             anchor_maps.append(("repeat", repeat_priority))
+            anchor_maps.append(("revisit", revisit_priority))
 
         for origin, score_map in anchor_maps:
             flat_indices = np.argsort(score_map.ravel())[::-1][: self.config.candidate_limit]
@@ -202,8 +212,14 @@ class HeuristicQuerySelector:
         repeat_value = repeat_support * (
             0.55 * uncertainty + 0.25 * dynamic + 0.20 * frontier
         )
+        revisit_mask = (region_coverage >= 1.0) & (region_coverage < self.config.repeat_target_coverage)
+        revisit_support = float(revisit_mask.mean())
+        revisit_value = revisit_support * (
+            0.55 * uncertainty + 0.25 * dynamic + 0.20 * frontier
+        )
         if stage == "coverage" or queries_used_for_seed < self.config.deliberate_repeat_after:
             repeat_value *= 0.25
+            revisit_value *= 0.20
 
         intentional_repeat_overlap = min(overlap_fraction, min(repeat_value, self.config.max_repeat_share))
         accidental_overlap = max(overlap_fraction - intentional_repeat_overlap, 0.0)
@@ -227,6 +243,7 @@ class HeuristicQuerySelector:
             + self.config.dynamic_weight * dynamic
             + self.config.frontier_weight * frontier
             + self.config.repeat_value_weight * repeat_scale * repeat_value
+            + self.config.revisit_weight * revisit_value
             - self.config.coverage_penalty * coverage_penalty
             - self.config.duplicate_penalty * excess_overlap
             - self.config.accidental_overlap_penalty * accidental_overlap
@@ -236,7 +253,8 @@ class HeuristicQuerySelector:
 
         reason = (
             f"nov={novelty:.3f} info={information_gain:.3f} unc={uncertainty:.3f} "
-            f"front={frontier:.3f} rep={repeat_value:.3f} acc={accidental_overlap:.3f}"
+            f"front={frontier:.3f} rep={repeat_value:.3f} rev={revisit_value:.3f} "
+            f"acc={accidental_overlap:.3f}"
         )
         return QueryCandidate(
             viewport=viewport,

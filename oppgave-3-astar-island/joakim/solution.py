@@ -23,6 +23,37 @@ from astar_solver import SolverConfig
 from astar_solver.constants import DEFAULT_TOTAL_QUERIES
 
 
+def _default_round_sort_key(round_info) -> tuple[int, str]:
+    """Prefer the numerically newest round, then newest timestamp."""
+    if not isinstance(round_info, dict):
+        return (-1, str(round_info))
+    round_number = round_info.get("round_number")
+    if not isinstance(round_number, int):
+        round_number = -1
+    tie_breaker = str(round_info.get("started_at") or round_info.get("event_date") or "")
+    return (round_number, tie_breaker)
+
+
+def _select_default_round_id(rounds: list[dict], budget: dict | None) -> str:
+    """Pick the best default round ID from API metadata."""
+    if isinstance(budget, dict) and budget.get("active") and budget.get("round_id"):
+        budget_round_id = str(budget["round_id"])
+        for item in rounds:
+            if isinstance(item, dict) and str(item.get("id")) == budget_round_id:
+                return budget_round_id
+
+    active_rounds = [
+        item
+        for item in rounds
+        if isinstance(item, dict) and str(item.get("status", "")).lower() == "active" and item.get("id")
+    ]
+    if active_rounds:
+        return str(sorted(active_rounds, key=_default_round_sort_key, reverse=True)[0]["id"])
+
+    newest_round = sorted(rounds, key=_default_round_sort_key, reverse=True)[0]
+    return str(newest_round["id"] if isinstance(newest_round, dict) else newest_round)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """CLI definition."""
     parser = argparse.ArgumentParser(description="Astar Island probabilistic solver")
@@ -45,7 +76,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Override total round query budget (default: {DEFAULT_TOTAL_QUERIES})",
     )
-    parser.add_argument("--prob-floor", type=float, default=0.01, help="Probability floor before renormalization")
+    parser.add_argument("--prob-floor", type=float, default=0.01, help="Baseline probability floor before renormalization")
+    parser.add_argument(
+        "--sharp-prob-floor",
+        type=float,
+        default=0.001,
+        help="Lower floor used for observed/static/high-confidence cells",
+    )
+    parser.add_argument(
+        "--sharp-prob-threshold",
+        type=float,
+        default=0.985,
+        help="Confidence threshold for switching to the sharp probability floor",
+    )
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature scaling factor")
     parser.add_argument(
         "--history-root",
@@ -82,8 +125,8 @@ def load_round_data(client, round_id: str | None, round_file: Path | None) -> tu
         rounds = client.get_rounds()
         if not rounds:
             raise ValueError("no rounds available")
-        latest_round = rounds[-1]
-        round_id = latest_round["id"] if isinstance(latest_round, dict) else latest_round
+        budget = client.get_budget()
+        round_id = _select_default_round_id(rounds, budget)
 
     return round_id, client.get_round(round_id), client.get_budget()
 
@@ -94,6 +137,8 @@ def run(
     queries_per_seed: int = 10,
     total_queries: int | None = None,
     prob_floor: float = 0.01,
+    sharp_prob_floor: float = 0.001,
+    sharp_prob_threshold: float = 0.985,
     temperature: float = 1.0,
     history_root: str = "oppgave-3-astar-island/joakim/history",
     submit: bool = True,
@@ -112,6 +157,8 @@ def run(
         history_root=history_root,
     )
     config.probability.floor = prob_floor
+    config.probability.sharp_floor = sharp_prob_floor
+    config.probability.sharp_floor_threshold = sharp_prob_threshold
     config.probability.temperature = temperature
 
     client = None
@@ -173,6 +220,8 @@ def main() -> None:
         queries_per_seed=args.queries,
         total_queries=args.total_queries,
         prob_floor=args.prob_floor,
+        sharp_prob_floor=args.sharp_prob_floor,
+        sharp_prob_threshold=args.sharp_prob_threshold,
         temperature=args.temperature,
         history_root=args.history_root,
         submit=not args.no_submit,
