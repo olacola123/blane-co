@@ -561,6 +561,157 @@ def recalibrate(client, state):
     return True
 
 
+# === SELVFORBEDRING ===
+
+def self_improve(client, state):
+    """
+    Analyser egne feil etter hver runde og juster.
+
+    Tre selvforbedringsmekanismer:
+    1. Bias-korreksjon: "vi overpredikerer settlement med 5%" → juster ned
+    2. Per-kategori alpha: noen celle-typer trenger sterkere/svakere prior
+    3. Rundetype-hukommelse: lagre hvilke runder som lignet hverandre
+    """
+    learning = load_learning_state()
+    history_dir = HISTORY_DIR
+
+    if not history_dir.exists():
+        return
+
+    # Finn runder der vi har BOTH prediction og ground truth
+    analyzed_rounds = learning.get("analyzed_rounds", [])
+    bias_corrections = learning.get("bias_corrections", [1.0] * NUM_CLASSES)
+
+    round_dirs = sorted(history_dir.iterdir()) if history_dir.exists() else []
+
+    new_analyses = 0
+    for round_dir in round_dirs:
+        if not round_dir.is_dir():
+            continue
+        rname = round_dir.name
+        if rname in analyzed_rounds:
+            continue
+
+        # Sjekk om vi har prediksjon og ground truth
+        has_pred = (round_dir / "seed_0_prediction.json").exists()
+        has_gt = (round_dir / "seed_0_ground_truth.json").exists()
+
+        if not (has_pred and has_gt):
+            continue
+
+        logger.info(f"  Selvforbedring: analyserer {rname}...")
+
+        # Beregn systematisk bias per klasse
+        class_pred_sum = np.zeros(NUM_CLASSES)
+        class_gt_sum = np.zeros(NUM_CLASSES)
+        n_cells = 0
+
+        for seed_idx in range(5):
+            pred_file = round_dir / f"seed_{seed_idx}_prediction.json"
+            gt_file = round_dir / f"seed_{seed_idx}_ground_truth.json"
+
+            if not (pred_file.exists() and gt_file.exists()):
+                continue
+
+            try:
+                pred = np.array(json.loads(pred_file.read_text()), dtype=float)
+                gt = np.array(json.loads(gt_file.read_text()), dtype=float)
+
+                if pred.shape != gt.shape:
+                    continue
+
+                # Aggreger over alle dynamiske celler
+                for y in range(min(pred.shape[0], MAP_H)):
+                    for x in range(min(pred.shape[1], MAP_W)):
+                        gt_cell = gt[y, x]
+                        pred_cell = pred[y, x]
+
+                        # Skip statiske (nesten-deterministiske) celler
+                        if max(gt_cell) > 0.99:
+                            continue
+
+                        class_pred_sum += pred_cell
+                        class_gt_sum += gt_cell
+                        n_cells += 1
+            except Exception:
+                continue
+
+        if n_cells < 100:
+            analyzed_rounds.append(rname)
+            continue
+
+        # Beregn bias: ratio mellom gt og pred per klasse
+        # > 1.0 = vi underpredikerer, < 1.0 = vi overpredikerer
+        avg_pred = class_pred_sum / n_cells
+        avg_gt = class_gt_sum / n_cells
+
+        round_bias = np.ones(NUM_CLASSES)
+        for k in range(NUM_CLASSES):
+            if avg_pred[k] > 0.001:
+                round_bias[k] = avg_gt[k] / avg_pred[k]
+            round_bias[k] = max(0.5, min(2.0, round_bias[k]))
+
+        # Oppdater kumulativ bias (exponential moving average)
+        ema_weight = 0.3  # ny data vekt
+        old_bias = np.array(bias_corrections)
+        new_bias = (1 - ema_weight) * old_bias + ema_weight * round_bias
+
+        logger.info(f"    Bias per klasse: {', '.join(f'{b:.2f}' for b in new_bias)}")
+        logger.info(f"    (empty={new_bias[0]:.2f} sett={new_bias[1]:.2f} port={new_bias[2]:.2f} "
+                    f"ruin={new_bias[3]:.2f} forest={new_bias[4]:.2f} mount={new_bias[5]:.2f})")
+
+        bias_corrections = new_bias.tolist()
+        analyzed_rounds.append(rname)
+        new_analyses += 1
+
+    if new_analyses > 0:
+        learning["bias_corrections"] = bias_corrections
+        learning["analyzed_rounds"] = analyzed_rounds
+        save_learning_state(learning)
+        logger.info(f"  Selvforbedring: {new_analyses} nye runder analysert")
+
+        # Oppdater calibration med bias-korreksjon
+        _apply_bias_to_calibration(bias_corrections)
+
+    return new_analyses > 0
+
+
+def _apply_bias_to_calibration(bias_corrections):
+    """Juster calibration_data.json med bias-korreksjon."""
+    if not CALIBRATION_FILE.exists():
+        return
+
+    try:
+        data = json.loads(CALIBRATION_FILE.read_text())
+        bias = np.array(bias_corrections)
+
+        # Juster transition table
+        table = data.get("transition_table", {})
+        for key, entry in table.items():
+            dist = np.array(entry["distribution"])
+            corrected = dist * bias
+            corrected = np.maximum(corrected, NEAR_ZERO)
+            corrected /= corrected.sum()
+            entry["distribution"] = corrected.tolist()
+
+        # Juster simple prior
+        simple = data.get("simple_prior", {})
+        for key, dist_list in simple.items():
+            dist = np.array(dist_list)
+            corrected = dist * bias
+            corrected = np.maximum(corrected, NEAR_ZERO)
+            corrected /= corrected.sum()
+            simple[key] = corrected.tolist()
+
+        data["bias_corrections_applied"] = bias_corrections
+        data["bias_timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        CALIBRATION_FILE.write_text(json.dumps(data, indent=2))
+        logger.info(f"  Kalibrering justert med bias-korreksjon")
+    except Exception as e:
+        logger.warning(f"  Bias-korreksjon feilet: {e}")
+
+
 # === HOVEDLOOP ===
 
 def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
@@ -586,6 +737,14 @@ def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
                 save_state(state)
             except Exception as e:
                 logger.warning(f"Rekalibrering feilet: {e}")
+
+            # Selvforbedring: analyser egne feil og juster
+            try:
+                if self_improve(client, state):
+                    transition_table, simple_prior = load_calibration()
+                    logger.info("Priors justert med bias-korreksjon!")
+            except Exception as e:
+                logger.warning(f"Selvforbedring feilet: {e}")
 
             # Finn ny runde
             round_id, round_data = find_new_round(client, state["solved_rounds"])
