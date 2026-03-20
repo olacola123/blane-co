@@ -43,8 +43,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from solution import (
     AstarClient, load_calibration, SeedObserver,
     build_cross_seed_prior, apply_cross_seed,
-    plan_queries,
-    MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS, PROB_FLOOR,
+    plan_queries, infer_round_type, adjust_priors_for_round,
+    load_learning_state, save_learning_state,
+    MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS, PROB_FLOOR, DEFAULT_ALPHA,
     distance_to_nearest_settlement, get_distance_band, is_coastal, get_prior,
 )
 
@@ -183,6 +184,38 @@ def adjust_priors_for_round(observers, factors):
 
 # === TWO-PASS SOLVER ===
 
+def update_alpha(state, prior_avg, obs_avg):
+    """
+    [ADAPTIV ALPHA] Juster alpha basert på om observasjoner hjalp eller skadet.
+    Hvis obs hjalp → senk alpha litt (stol mer på obs).
+    Hvis obs skadet → øk alpha (stol mer på prior).
+    """
+    learning = load_learning_state()
+    current_alpha = learning.get("alpha", DEFAULT_ALPHA)
+
+    if isinstance(prior_avg, (int, float)) and isinstance(obs_avg, (int, float)):
+        diff = obs_avg - prior_avg
+        if diff > 0:
+            learning["obs_helped_count"] = learning.get("obs_helped_count", 0) + 1
+            # Obs hjalp → senk alpha litt (min 8)
+            new_alpha = max(8.0, current_alpha - 1.0)
+            logger.info(f"  Alpha: obs hjalp ({diff:+.1f}) → {current_alpha:.0f} → {new_alpha:.0f}")
+        else:
+            learning["obs_hurt_count"] = learning.get("obs_hurt_count", 0) + 1
+            # Obs skadet → øk alpha (max 30)
+            new_alpha = min(30.0, current_alpha + 1.5)
+            logger.info(f"  Alpha: obs skadet ({diff:+.1f}) → {current_alpha:.0f} → {new_alpha:.0f}")
+
+        learning["alpha"] = new_alpha
+        learning.setdefault("round_history", []).append({
+            "prior_avg": prior_avg, "obs_avg": obs_avg,
+            "diff": diff, "alpha_used": current_alpha, "new_alpha": new_alpha,
+        })
+        save_learning_state(learning)
+
+    return learning.get("alpha", DEFAULT_ALPHA)
+
+
 def solve_round_two_pass(client, round_id, round_data, transition_table, simple_prior):
     """
     To-pass strategi:
@@ -195,7 +228,9 @@ def solve_round_two_pass(client, round_id, round_data, transition_table, simple_
         return []
 
     n_seeds = len(seeds_data)
-    logger.info(f"{n_seeds} seeds")
+    learning = load_learning_state()
+    alpha = learning.get("alpha", DEFAULT_ALPHA)
+    logger.info(f"{n_seeds} seeds (alpha={alpha:.0f})")
 
     # === PASS 1: Submit prior-only ===
     logger.info("PASS 1: Submitter prior-only (sikkerhetsnett)...")
@@ -207,10 +242,10 @@ def solve_round_two_pass(client, round_id, round_data, transition_table, simple_
         grid = seed.get("grid", [])
         settlements = seed.get("settlements", [])
 
-        obs = SeedObserver(grid, settlements, transition_table, simple_prior)
+        obs = SeedObserver(grid, settlements, transition_table, simple_prior, alpha=alpha)
         observers.append(obs)
 
-        pred = obs.build_prediction()
+        pred = obs.build_prediction(apply_smoothing=False)
         try:
             resp = client.submit(round_id, seed_idx, pred.tolist())
             score = resp.get("score", resp.get("seed_score", "?"))
@@ -302,11 +337,11 @@ def solve_round_two_pass(client, round_id, round_data, transition_table, simple_
         logger.info(f"  Cross-seed: {len(cross_table)} kategorier")
         apply_cross_seed(observers, cross_table, transition_table)
 
-    # Resubmit alle seeds
-    logger.info("\nResubmit med observasjoner...")
+    # Resubmit alle seeds med smoothing
+    logger.info("\nResubmit med observasjoner + smoothing...")
     results = []
     for seed_idx, obs in enumerate(observers):
-        pred = obs.build_prediction()
+        pred = obs.build_prediction(apply_smoothing=True)
         try:
             resp = client.submit(round_id, seed_idx, pred.tolist())
             score = resp.get("score", resp.get("seed_score", "?"))
@@ -320,12 +355,20 @@ def solve_round_two_pass(client, round_id, round_data, transition_table, simple_
                 "seed_index": seed_idx,
                 "score": score,
                 "prior_score": prior_s,
-                "method": "observed+cross-seed",
+                "method": "observed+cross-seed+smoothing",
             })
             time.sleep(0.4)
         except Exception as e:
             logger.error(f"  Seed {seed_idx} resubmit feil: {e}")
             results.append({"seed_index": seed_idx, "score": prior_s, "method": "prior-only"})
+
+    # [ADAPTIV ALPHA] Sammenlign prior vs obs og juster
+    obs_scores = [r["score"] for r in results if isinstance(r.get("score"), (int, float))]
+    pri_scores = [r["prior_score"] for r in results if isinstance(r.get("prior_score"), (int, float))]
+    if obs_scores and pri_scores:
+        obs_avg = sum(obs_scores) / len(obs_scores)
+        pri_avg = sum(pri_scores) / len(pri_scores)
+        update_alpha(state={}, prior_avg=pri_avg, obs_avg=obs_avg)
 
     return results
 
