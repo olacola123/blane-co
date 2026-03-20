@@ -36,21 +36,23 @@ API_KEY = os.environ.get("API_KEY", "")
 MAP_W, MAP_H = 40, 40
 NUM_CLASSES = 6
 MAX_VIEWPORT = 15
-PROB_FLOOR = 0.003
+PROB_FLOOR = 0.003      # standard floor for mulige klasser
+NEAR_ZERO = 0.0001     # floor for umulige klasser (mountain på slette, port innland)
 DEFAULT_ALPHA = 15.0
 
 TERRAIN_TO_CLASS = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 0, 11: 0}
 DISTANCE_BANDS = [0, 1, 2, 3, 5, 8, 12, 99]
 
+# BUG 2 FIX: Mountain=0.0001 for alle dynamiske terreng (aldri fjell på slette)
 FALLBACK_PRIOR = {
-    "0":  [0.70, 0.08, 0.03, 0.06, 0.10, 0.03],
-    "10": [0.999, 0.0002, 0.0002, 0.0002, 0.0002, 0.0002],
-    "11": [0.822, 0.121, 0.009, 0.012, 0.035, 0.001],
-    "1":  [0.462, 0.293, 0.004, 0.026, 0.216, 0.001],
-    "2":  [0.484, 0.089, 0.173, 0.022, 0.232, 0.001],
-    "3":  [0.20, 0.15, 0.08, 0.32, 0.20, 0.05],
-    "4":  [0.079, 0.127, 0.009, 0.013, 0.772, 0.001],
-    "5":  [0.0002, 0.0002, 0.0002, 0.0002, 0.0002, 0.999],
+    "0":  [0.725, 0.082, 0.031, 0.062, 0.100, 0.0001],
+    "10": [0.998, 0.0005, 0.0005, 0.0005, 0.0005, 0.0001],
+    "11": [0.822, 0.121, 0.009, 0.012, 0.035, 0.0001],
+    "1":  [0.462, 0.293, 0.004, 0.026, 0.214, 0.0001],
+    "2":  [0.484, 0.089, 0.173, 0.022, 0.231, 0.0001],
+    "3":  [0.224, 0.158, 0.084, 0.337, 0.197, 0.0001],
+    "4":  [0.079, 0.127, 0.009, 0.013, 0.772, 0.0001],
+    "5":  [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.9996],
 }
 
 CALIBRATION_FILE = Path(__file__).parent / "calibration_data.json"
@@ -268,8 +270,25 @@ class SeedObserver:
         self.mountain_mask = (self.grid == 5)
         self.static_mask = self.ocean_mask | self.mountain_mask
 
-        # Forhåndsberegn prior
+        # BUG 1 FIX A: Preberegn coastal_mask (i stedet for per-celle is_coastal())
+        self.coastal_mask = np.zeros((MAP_H, MAP_W), dtype=bool)
+        for y in range(MAP_H):
+            for x in range(MAP_W):
+                if self.static_mask[y, x]:
+                    continue
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < MAP_H and 0 <= nx < MAP_W:
+                            if self.grid[ny, nx] == 10:
+                                self.coastal_mask[y, x] = True
+                                break
+                    if self.coastal_mask[y, x]:
+                        break
+
+        # Forhåndsberegn prior + klasse-spesifikk floor per celle
         self._prior_cache = np.zeros((MAP_H, MAP_W, NUM_CLASSES), dtype=float)
+        self._floor_cache = np.full((MAP_H, MAP_W, NUM_CLASSES), PROB_FLOOR, dtype=float)
         grid_list = self.grid.tolist()
         for y in range(MAP_H):
             for x in range(MAP_W):
@@ -279,6 +298,12 @@ class SeedObserver:
                 self._prior_cache[y, x] = get_prior(
                     terrain, band, coastal, transition_table, simple_prior
                 )
+                # BUG 1 FIX B: Klasse-spesifikke floors
+                # Mountain umulig på ikke-fjell-celler
+                self._floor_cache[y, x, 5] = NEAR_ZERO
+                # Port umulig på innlandsceller
+                if not self.coastal_mask[y, x]:
+                    self._floor_cache[y, x, 2] = NEAR_ZERO
 
     def add_observation(self, grid_data, viewport_x, viewport_y):
         for dy, row in enumerate(grid_data):
@@ -301,7 +326,7 @@ class SeedObserver:
             # Blend settlement-signal inn i prior (ikke obs counts)
             current_prior = self._prior_cache[y, x]
             blended = (1 - confidence * 0.3) * current_prior + confidence * 0.3 * signal
-            blended = np.maximum(blended, PROB_FLOOR)
+            np.maximum(blended, self._floor_cache[y, x], out=blended)
             blended /= blended.sum()
             self._prior_cache[y, x] = blended
 
@@ -337,7 +362,11 @@ class SeedObserver:
 
                     pred[y, x] = self.counts[y, x] + a * prior
 
-                np.maximum(pred[y, x], PROB_FLOOR, out=pred[y, x])
+                # BUG 1+4 FIX: Normaliser FØRST, klasse-spesifikk floor ETTER
+                s = pred[y, x].sum()
+                if s > 0:
+                    pred[y, x] /= s
+                np.maximum(pred[y, x], self._floor_cache[y, x], out=pred[y, x])
                 pred[y, x] /= pred[y, x].sum()
 
         # [FORBEDRING 3] Spatial smoothing
@@ -385,7 +414,8 @@ def apply_cross_seed(observers, cross_table, calibration_table):
                     hist_prior = obs._prior_cache[y, x]
                     cross_weight = min(0.5, cross_n / 100.0)
                     blended = (1 - cross_weight) * hist_prior + cross_weight * cross_dist
-                    blended = np.maximum(blended, PROB_FLOOR)
+                    # BUG 3 FIX: Klasse-spesifikk floor (ikke uniform)
+                    np.maximum(blended, obs._floor_cache[y, x], out=blended)
                     blended /= blended.sum()
                     obs._prior_cache[y, x] = blended
 
