@@ -508,7 +508,8 @@ POST /product {{name, number:"STRING!", priceExcludingVatCurrency:X, priceInclud
 
 ── DEPARTMENT ──
 POST /department {{name, departmentNumber:INT}}
-- departmentNumber must be unique integer — check existing numbers in context
+- departmentNumber must be unique integer — use numbers from EXISTING DEPARTMENT NUMBERS in context +1, +2, etc. Do NOT GET /department yourself!
+- For 3 departments: just POST 3 times with unique numbers. No GET needed.
 
 ── INVOICE (multi-step) ──
 Bank account is pre-registered. Steps:
@@ -521,20 +522,9 @@ Bank account is pre-registered. Steps:
    - unitPriceExcludingVatCurrency is REQUIRED on orderline
 5. POST /invoice {{invoiceDate:"{today}", invoiceDueDate:"{due}", orders:[{{id:X}}]}} query_params: sendToCustomer=false
 
-CRITICAL — PRICE INTERPRETATION:
-- Prices in the prompt are ALWAYS the price EXCLUDING VAT (eks. MVA) unless explicitly stated as "inkl. MVA" / "incl. VAT" / "TTC" / "con IVA incluido"
-- "28950 kr" without qualifier = 28950 kr EXCLUDING VAT
-- "28950 NOK sin IVA" / "hors TVA" / "ohne MwSt" / "sem IVA" = EXCLUDING VAT
-- "28950 NOK con IVA" / "TTC" / "inkl. MVA" / "mit MwSt" = INCLUDING VAT
-- unitPriceExcludingVatCurrency on orderline = the price EXCLUDING VAT from the prompt
-- priceExcludingVatCurrency on product = same price EXCLUDING VAT
-- priceIncludingVatCurrency on product = priceExcludingVatCurrency × 1.25 (for 25% VAT)
-- paidAmount on /:payment = TOTAL INCLUDING VAT (sum of all orderlines × 1.25)
-
-── INVOICE FIELDS (for GET) ──
-Valid: id,version,invoiceNumber,invoiceDate,invoiceDueDate,amount,amountCurrency,amountExcludingVat,amountExcludingVatCurrency,amountOutstanding,customer,orders
-INVALID: isPaid, amountIncludingVat, amountIncludingVatCurrency, amountOutstandingCurrency, payments
-GET /invoice REQUIRES: invoiceDateFrom=YYYY-MM-DD&invoiceDateTo=YYYY-MM-DD
+PRICES: Always EXCLUDING VAT unless "inkl. MVA"/"TTC"/"con IVA incluido"/"mit MwSt" is stated.
+paidAmount on /:payment = TOTAL INCLUDING VAT (orderline sum × 1.25)
+GET /invoice REQUIRES: invoiceDateFrom & invoiceDateTo params.
 
 ── INVOICE + PAYMENT ──
 After creating invoice:
@@ -655,46 +645,15 @@ Step 4: Try salary/transaction first:
    NEVER use "dimensions", "dimension1", or "accountingDimensionValue" on postings
 
 ── SUPPLIER INVOICE / INCOMING INVOICE ──
-1. POST /customer {{name, organizationNumber, email, phoneNumber, isCustomer:false, isSupplier:true}} (creates supplier visible on both endpoints)
-2. GET /ledger/account?number=NNNN&fields=id,number,name (find expense account ID)
-3. POST /incomingInvoice query_params: sendTo=ledger
-   Body format (IMPORTANT — uses wrapper objects, NOT flat fields!):
-   {{
-     "invoiceHeader": {{
-       "vendorId": SUPPLIER_ID_AS_INTEGER,
-       "invoiceDate": "YYYY-MM-DD",
-       "dueDate": "YYYY-MM-DD",
-       "currencyId": 1,
-       "invoiceAmount": AMOUNT_INCL_VAT,
-       "description": "Invoice description",
-       "invoiceNumber": "INV-XXXX"
-     }},
-     "orderLines": [{{
-       "externalId": "line1",
-       "row": 1,
-       "description": "Line description",
-       "accountId": EXPENSE_ACCOUNT_ID_AS_INTEGER,
-       "amountInclVat": AMOUNT_INCL_VAT,
-       "vatTypeId": 3,
-       "count": 1
-     }}]
-   }}
-- vendorId is INTEGER (not {{id:X}} object!)
-- accountId is INTEGER (not {{id:X}} object!)
-- vatTypeId is INTEGER (not {{id:X}} object!)
-- For 25% VAT: vatTypeId=3, amountInclVat=total incl VAT (Tripletex auto-calculates VAT split)
-- If 403 on /incomingInvoice: module unavailable. Fall back to VOUCHER approach:
-  Use LEDGER ACCOUNT IDS from context for 2710 and 2400 (pre-fetched, do NOT GET them yourself).
-  Only GET the expense account if it's not 5000/1920/2710/2400 (which are already in context).
-  a. Expense account ID: GET /ledger/account?number=EXPENSE_ACCT&fields=id (e.g. 6860, 7300)
-  b. Account 2710 ID: use ACCT_2710_ID from context
-  c. Account 2400 ID: use ACCT_2400_ID from context
-  d. POST /ledger/voucher with postings:
-     - Expense account: amountGross = amount_excl_vat (positive/debit)
-     - Account 2710: amountGross = vat_amount (positive/debit)
-     - Account 2400: amountGross = -amount_incl_vat (negative/credit), supplier:{{id:SUPPLIER_ID}}
-     All postings need row, vatType:{{id:0}}, date
-  e. Calculate: amount_excl_vat = amount_incl_vat / 1.25, vat_amount = amount_incl_vat - amount_excl_vat
+1. POST /customer {{name, organizationNumber, email, phoneNumber, isCustomer:false, isSupplier:true}}
+2. GET /ledger/account?number=EXPENSE_ACCT&fields=id (only if NOT in LEDGER ACCOUNT IDS context)
+3. Create voucher with 3 postings (calculate: excl = incl/1.25, vat = incl - excl):
+   POST /ledger/voucher {{date:"{today}", description:"...", postings:[
+     {{account:{{id:EXPENSE_ACCT_ID}}, amountGross:AMOUNT_EXCL_VAT, amountGrossCurrency:AMOUNT_EXCL_VAT, date:"{today}", row:1, vatType:{{id:0}}}},
+     {{account:{{id:ACCT_2710_ID}}, amountGross:VAT_AMOUNT, amountGrossCurrency:VAT_AMOUNT, date:"{today}", row:2, vatType:{{id:0}}}},
+     {{account:{{id:ACCT_2400_ID}}, amountGross:-AMOUNT_INCL_VAT, amountGrossCurrency:-AMOUNT_INCL_VAT, date:"{today}", row:3, vatType:{{id:0}}, supplier:{{id:SUPPLIER_ID}}}}
+   ]}}
+   Use ACCT_2710_ID and ACCT_2400_ID from LEDGER ACCOUNT IDS in context.
 
 ── UPDATE EXISTING RESOURCE ──
 1. GET /resource?fields=id,name,version (search)
@@ -705,25 +664,11 @@ Step 4: Try salary/transaction first:
 1. GET /resource?fields=id,name (search)
 2. DELETE /resource/ID
 
-═══ PRE-POPULATED DATA ═══
-Fresh sandboxes come with pre-populated employees, products, and customers.
-- Employees: checked in EXISTING EMPLOYEES context (use PUT to update)
-- Products: if POST fails with "number already exists" or "name already exists":
-  → GET /product?number=XXXX&fields=id,name,number,priceExcludingVatCurrency — use the existing product ID
-  → Set the PROMPT's price on the orderline (unitPriceExcludingVatCurrency), ignore the product's stored price
-- Customers: if POST fails with duplicate:
-  → GET /customer?name=XXXX&fields=id,name,organizationNumber — use existing customer ID
-
 ═══ ERROR HANDLING ═══
-- 422: Read validationMessages carefully. Fix the specific field mentioned.
-- 401: Token invalid — stop immediately.
-- 403: Could be module unavailable OR token expiry. Try ONE more time. If still 403, skip and create partial resources.
-- 404: Wrong endpoint — check the path.
-- 409: Version conflict — GET fresh version, retry PUT.
-- Duplicate (email/number): GET existing resource by email/number/name, use its ID. NEVER modify the email/number.
-- "Nummeret er allerede i bruk" for products: GET /product?number=XXXX to find existing, use its ID.
-- "department.id må fylles ut": Use department ID from context.
-- IMPORTANT: Always include dateOfBirth in PUT for employees (use "1985-01-01" if not in prompt)."""
+- 422: Read validationMessages, fix the field. Product duplicate → GET /product?number=XXXX, use existing ID.
+- 403: Skip immediately, use fallback approach.
+- 409: GET fresh version, retry PUT.
+- Duplicate email/number: GET existing, use its ID. NEVER modify email."""
 
 
 # ═══════════════════════════════════════════════
