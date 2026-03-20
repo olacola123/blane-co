@@ -1,6 +1,6 @@
 """
 Tripletex AI Accounting Agent — NM i AI 2026
-v4: Fikset system prompt, thread-safe, bedre PDF-parsing, bedre oppskrifter.
+v12: Pre-fetched context + stronger email handling + optimized prompts.
 """
 
 import base64
@@ -9,16 +9,13 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 import traceback
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 
+import anthropic
 import requests
-from google import genai
-from google.genai.types import GenerateContentConfig, AutomaticFunctionCallingConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -27,392 +24,888 @@ log = logging.getLogger("agent")
 
 app = FastAPI()
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SUBMISSION_LOG_PATH = Path(os.environ.get("SUBMISSION_LOG", "/tmp/tripletex_submissions.jsonl"))
-
-# Thread-local state for concurrent requests
-_local = threading.local()
+LOG_PATH = Path(os.environ.get("SUBMISSION_LOG", "/tmp/tripletex_submissions.jsonl"))
 
 
-def _get_ctx():
-    return getattr(_local, "ctx", None)
+# ═══════════════════════════════════════════════
+# TOOLS — Claude calls these to interact with Tripletex API
+# ═══════════════════════════════════════════════
+
+TOOLS = [
+    {
+        "name": "tripletex_get",
+        "description": "GET request to Tripletex API. Returns JSON response.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "API path, e.g. /employee or /department"},
+                "query_params": {"type": "string", "description": "Query string, e.g. 'fields=id,name&count=10'. Empty string if none.", "default": ""},
+            },
+            "required": ["endpoint"],
+        },
+    },
+    {
+        "name": "tripletex_post",
+        "description": "POST request to create a resource. Returns JSON response with created object.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "API path, e.g. /employee"},
+                "body": {"type": "object", "description": "JSON body to send"},
+                "query_params": {"type": "string", "description": "Query string. Empty string if none.", "default": ""},
+            },
+            "required": ["endpoint", "body"],
+        },
+    },
+    {
+        "name": "tripletex_put",
+        "description": "PUT request to update a resource or trigger an action. For actions like /:payment, use query_params for parameters (NOT body).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "API path, e.g. /employee/123 or /invoice/456/:payment"},
+                "body": {"type": "object", "description": "JSON body (for updates). Empty object {} for actions.", "default": {}},
+                "query_params": {"type": "string", "description": "Query string. For actions like /:payment, put params here.", "default": ""},
+            },
+            "required": ["endpoint"],
+        },
+    },
+    {
+        "name": "tripletex_delete",
+        "description": "DELETE request to remove a resource.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "API path with ID, e.g. /travelExpense/789"},
+            },
+            "required": ["endpoint"],
+        },
+    },
+]
 
 
-# === TRIPLETEX TOOL FUNCTIONS (called by Gemini) ===
+# ═══════════════════════════════════════════════
+# API EXECUTION
+# ═══════════════════════════════════════════════
 
-def tripletex_get(endpoint: str, query_params: str = "") -> str:
-    """Make a GET request to the Tripletex API.
+def execute_tool(name: str, input_data: dict, session: requests.Session, base_url: str, trace: list, ctx: dict = None) -> str:
+    """Execute a Tripletex API tool call. Returns truncated JSON string."""
+    endpoint = input_data.get("endpoint", "")
+    qp = input_data.get("query_params", "") or ""
+    params = dict(p.split("=", 1) for p in qp.split("&") if "=" in p) if qp else None
+    body = input_data.get("body")
 
-    Args:
-        endpoint: API endpoint path, e.g. '/employee', '/customer', '/department'
-        query_params: URL query string, e.g. 'fields=id,name&count=10' or 'name=Acme&fields=id,name'
+    # Intercept: redirect POST /supplier → POST /customer with isSupplier:true
+    if name == "tripletex_post" and endpoint.strip("/") == "supplier":
+        endpoint = "/customer"
+        if body:
+            body["isSupplier"] = True
+            if "isCustomer" not in body:
+                body["isCustomer"] = False
+        log.info(f"Redirected POST /supplier → POST /customer with isSupplier:true")
 
-    Returns:
-        JSON response as string with the API result
-    """
-    ctx = _get_ctx()
-    ctx["call_count"] += 1
-    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
-    params = dict(p.split("=", 1) for p in query_params.split("&") if "=" in p) if query_params else None
-    resp = ctx["session"].get(url, params=params)
-    if resp.status_code >= 400:
-        ctx["error_count"] += 1
-        log.error(f"GET {endpoint} → {resp.status_code}: {resp.text[:300]}")
-    else:
-        log.info(f"GET {endpoint} → {resp.status_code}")
-    return resp.text[:5000]
+    # Intercept: PUT /employee — preserve pre-fetched dateOfBirth if Claude uses "1985-01-01"
+    if name == "tripletex_put" and "/employee/" in endpoint and body and ctx:
+        if body.get("dateOfBirth") == "1985-01-01":
+            emp_id_str = endpoint.rstrip("/").split("/")[-1]
+            try:
+                emp_id = int(emp_id_str)
+                for e in ctx.get("employees", []):
+                    if e.get("id") == emp_id and e.get("dateOfBirth") and e["dateOfBirth"] != "1985-01-01":
+                        body["dateOfBirth"] = e["dateOfBirth"]
+                        log.info(f"Fixed dateOfBirth: 1985-01-01 → {e['dateOfBirth']} for employee {emp_id}")
+                        break
+            except (ValueError, TypeError):
+                pass
 
+    url = f"{base_url}/{endpoint.lstrip('/')}"
 
-def tripletex_post(endpoint: str, body_json: str) -> str:
-    """Make a POST request to the Tripletex API to create a resource.
-
-    Args:
-        endpoint: API endpoint path, e.g. '/employee', '/customer', '/product', '/order', '/invoice'
-        body_json: JSON string with the request body, e.g. '{"name": "Test AS", "isCustomer": true}'
-
-    Returns:
-        JSON response as string with the created resource (including its id)
-    """
-    ctx = _get_ctx()
-    ctx["call_count"] += 1
-    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
     try:
-        data = json.loads(body_json)
-    except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON in body_json"})
-    log.info(f"POST {endpoint} BODY: {body_json[:300]}")
-    resp = ctx["session"].post(url, json=data)
-    if resp.status_code >= 400:
-        ctx["error_count"] += 1
-        log.error(f"POST {endpoint} → {resp.status_code}: {resp.text[:300]}")
+        if name == "tripletex_get":
+            resp = session.get(url, params=params, timeout=30)
+        elif name == "tripletex_post":
+            resp = session.post(url, json=body, params=params, timeout=30)
+        elif name == "tripletex_put":
+            if body and body != {}:
+                resp = session.put(url, json=body, params=params, timeout=30)
+            else:
+                resp = session.put(url, params=params, timeout=30)
+        elif name == "tripletex_delete":
+            resp = session.delete(url, timeout=30)
+        else:
+            return json.dumps({"error": f"Unknown tool: {name}"})
+    except (requests.Timeout, requests.ConnectionError) as e:
+        log.error(f"{name} {endpoint} → connection error: {e}")
+        trace.append({"tool": name, "endpoint": endpoint, "status": 0, "error": str(e)[:200]})
+        return json.dumps({"error": str(e)[:200]})
+
+    status_code = resp.status_code
+    trace.append({
+        "tool": name,
+        "endpoint": endpoint,
+        "status": status_code,
+        "error": resp.text[:300] if status_code >= 400 else None,
+    })
+
+    if status_code >= 400:
+        log.error(f"{name} {endpoint} → {status_code}: {resp.text[:300]}")
     else:
-        log.info(f"POST {endpoint} → {resp.status_code}")
-    return resp.text[:5000]
+        log.info(f"{name} {endpoint} → {status_code}")
+
+    try:
+        result = resp.json()
+    except Exception:
+        result = {"raw": resp.text[:500]}
+
+    # Truncate large responses to save tokens
+    text = json.dumps(result, ensure_ascii=False)
+    if len(text) > 3000:
+        if isinstance(result, dict) and "values" in result:
+            result["values"] = result["values"][:10]
+            result["_truncated"] = True
+            result["_note"] = "Use query params to filter (e.g. number=2002) instead of browsing"
+            text = json.dumps(result, ensure_ascii=False)
+        if len(text) > 3000:
+            text = text[:3000]
+    return text
 
 
-def tripletex_put(endpoint: str, body_json: str = "", query_params: str = "") -> str:
-    """Make a PUT request to the Tripletex API to update a resource or execute an action.
+# ═══════════════════════════════════════════════
+# PRE-FETCH CONTEXT
+# ═══════════════════════════════════════════════
 
-    For regular updates: use body_json with the updated fields.
-    For actions (endpoints with : like /:payment, /:approve): use query_params instead of body.
+def prefetch_context(session: requests.Session, base_url: str) -> dict:
+    """Pre-fetch commonly needed data in parallel to reduce latency."""
+    import concurrent.futures
+    ctx = {}
 
-    Args:
-        endpoint: API endpoint path, e.g. '/employee/123' or '/invoice/456/:payment'
-        body_json: JSON string with request body (for regular updates). Leave empty for action endpoints.
-        query_params: Query parameters string (for action endpoints like /:payment), e.g. 'paymentDate=2026-03-19&paymentTypeId=123&paidAmount=1250.0'
-
-    Returns:
-        JSON response as string
-    """
-    ctx = _get_ctx()
-    ctx["call_count"] += 1
-    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
-    params = dict(p.split("=", 1) for p in query_params.split("&") if "=" in p) if query_params else None
-
-    if "/:" in endpoint:
-        resp = ctx["session"].put(url, params=params)
-    else:
+    def fetch(name, endpoint, params):
         try:
-            data = json.loads(body_json) if body_json else {}
-        except json.JSONDecodeError:
-            return json.dumps({"error": "Invalid JSON in body_json"})
-        resp = ctx["session"].put(url, json=data, params=params)
+            resp = session.get(f"{base_url}/{endpoint}", params=params, timeout=10)
+            if resp.status_code == 200:
+                return name, resp.json().get("values", [])
+        except Exception as e:
+            log.warning(f"Prefetch {name}: {e}")
+        return name, []
 
-    if resp.status_code >= 400:
-        ctx["error_count"] += 1
-        log.error(f"PUT {endpoint} → {resp.status_code}: {resp.text[:300]}")
+    # Run all fetches in parallel
+    fetches = [
+        ("employees", "employee", {"fields": "id,firstName,lastName,email,dateOfBirth,userType,version,department", "count": "100"}),
+        ("departments", "department", {"fields": "id,name,departmentNumber", "count": "10"}),
+        ("divisions", "division", {"fields": "id,name", "count": "5"}),
+        ("activities", "activity", {"fields": "id,name", "count": "20"}),
+        ("payment_types", "invoice/paymentType", {"fields": "id,description", "count": "5"}),
+        ("products", "product", {"fields": "id,name,number,priceExcludingVatCurrency", "count": "100"}),
+        ("customers", "customer", {"fields": "id,name,organizationNumber", "count": "100"}),
+        ("suppliers", "supplier", {"fields": "id,name,organizationNumber", "count": "100"}),
+        ("salary_2000", "salary/type", {"number": "2000", "fields": "id,number,name"}),
+        ("salary_2001", "salary/type", {"number": "2001", "fields": "id,number,name"}),
+        ("salary_2002", "salary/type", {"number": "2002", "fields": "id,number,name"}),
+        ("salary_2005", "salary/type", {"number": "2005", "fields": "id,number,name"}),
+        ("rate_categories", "travelExpense/rateCategory", {"fields": "id,name,type,fromDate,toDate", "count": "500"}),
+        ("acct_5000", "ledger/account", {"number": "5000", "fields": "id,number,name"}),
+        ("acct_2780", "ledger/account", {"number": "2780", "fields": "id,number,name"}),
+        ("acct_1920", "ledger/account", {"number": "1920", "fields": "id,number,name"}),
+        ("acct_2710", "ledger/account", {"number": "2710", "fields": "id,number,name"}),
+        ("acct_2400", "ledger/account", {"number": "2400", "fields": "id,number,name"}),
+    ]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(fetch, name, ep, params): name for name, ep, params in fetches}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                name, values = future.result()
+            except Exception as e:
+                log.warning(f"Prefetch future failed: {e}")
+                continue
+            if name == "employees":
+                ctx["employees"] = values
+                log.info(f"Pre-fetched {len(values)} employees")
+            elif name == "departments":
+                ctx["departments"] = values
+                if values:
+                    ctx["default_department_id"] = values[0]["id"]
+                log.info(f"Pre-fetched {len(values)} departments")
+            elif name == "divisions":
+                ctx["divisions"] = values
+                if values:
+                    ctx["default_division_id"] = values[0]["id"]
+            elif name == "activities":
+                ctx["activities"] = values
+            elif name == "payment_types":
+                ctx["payment_types"] = values
+            elif name == "products":
+                ctx["products"] = values
+                log.info(f"Pre-fetched {len(values)} products")
+            elif name == "customers":
+                ctx["customers"] = values
+                log.info(f"Pre-fetched {len(values)} customers")
+            elif name == "suppliers":
+                ctx["suppliers"] = values
+                log.info(f"Pre-fetched {len(values)} suppliers")
+            elif name == "rate_categories":
+                # Find 2026-valid overnight domestic per diem category
+                try:
+                    for rc in values:
+                        n = str(rc.get("name") or "")
+                        fr = str(rc.get("fromDate") or "")
+                        to = str(rc.get("toDate") or "")
+                        if "Overnatting" in n and "innland" in n and fr >= "2026" and to >= "2026":
+                            ctx["per_diem_rate_category_id"] = rc["id"]
+                            log.info(f"Per diem rate category: id={rc['id']} name={n}")
+                            break
+                except Exception as e:
+                    log.warning(f"Rate category search failed: {e}")
+            elif name.startswith("salary_"):
+                num = name.split("_")[1]
+                if values:
+                    if "salary_types" not in ctx:
+                        ctx["salary_types"] = {}
+                    ctx["salary_types"][num] = {"id": values[0]["id"], "name": values[0].get("name", ""), "number": num}
+            elif name.startswith("acct_"):
+                acct_num = name.split("_")[1]
+                if values:
+                    if "ledger_accounts" not in ctx:
+                        ctx["ledger_accounts"] = {}
+                    ctx["ledger_accounts"][acct_num] = values[0]["id"]
+
+    if ctx.get("salary_types"):
+        log.info(f"Pre-fetched salary types: {list(ctx['salary_types'].keys())}")
+    if ctx.get("ledger_accounts"):
+        log.info(f"Pre-fetched ledger accounts: {ctx['ledger_accounts']}")
+
+    # Post-fetch: check employments for each employee (fast, parallel)
+    if ctx.get("employees"):
+        def fetch_employment(emp):
+            try:
+                resp = session.get(f"{base_url}/employee/employment",
+                    params={"employeeId": emp["id"], "fields": "id,startDate,division", "count": "5"}, timeout=10)
+                if resp.status_code == 200:
+                    empls = resp.json().get("values", [])
+                    return emp["id"], empls
+            except Exception:
+                pass
+            return emp["id"], []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            empl_results = list(ex.map(fetch_employment, ctx["employees"]))
+        for emp_id, empls in empl_results:
+            for e in ctx["employees"]:
+                if e["id"] == emp_id:
+                    e["_employments"] = empls
+                    break
+        log.info(f"Pre-fetched employments for {len(ctx['employees'])} employees")
+
+    return ctx
+
+
+def format_prefetched_context(ctx: dict) -> str:
+    """Format pre-fetched data for the user message."""
+    parts = []
+
+    if ctx.get("employees"):
+        emp_lines = []
+        for e in ctx["employees"]:
+            dept_id = ""
+            if isinstance(e.get("department"), dict):
+                dept_id = e["department"].get("id", "")
+            empls = e.get("_employments", [])
+            empl_info = ""
+            if empls:
+                empl = empls[0]
+                div_id = ""
+                if isinstance(empl.get("division"), dict):
+                    div_id = empl["division"].get("id", "")
+                empl_info = f" hasEmployment=YES employmentId={empl['id']} divisionId={div_id}"
+            else:
+                empl_info = " hasEmployment=NO"
+            emp_lines.append(f"  id={e['id']} email={e.get('email','')} name={e.get('firstName','')} {e.get('lastName','')} dateOfBirth={e.get('dateOfBirth','')} userType={e.get('userType','')} version={e.get('version','')} dept={dept_id}{empl_info}")
+        parts.append("EXISTING EMPLOYEES (use PUT to update if email matches — KEEP existing dateOfBirth!):\n" + "\n".join(emp_lines))
+
+    if ctx.get("default_department_id"):
+        parts.append(f"DEFAULT DEPARTMENT ID: {ctx['default_department_id']}")
+
+    if ctx.get("default_division_id"):
+        parts.append(f"DEFAULT DIVISION ID: {ctx['default_division_id']}")
     else:
-        log.info(f"PUT {endpoint} → {resp.status_code}")
-    return resp.text[:5000] if resp.text else '{"status": "ok"}'
+        parts.append("NO DIVISIONS EXIST — create one if needed for employment")
+
+    if ctx.get("activities"):
+        act_lines = [f"  id={a['id']} name={a.get('name','')}" for a in ctx["activities"]]
+        parts.append("AVAILABLE ACTIVITIES:\n" + "\n".join(act_lines))
+
+    if ctx.get("departments"):
+        dept_nums = [str(d.get("departmentNumber", "")) for d in ctx["departments"] if d.get("departmentNumber")]
+        if dept_nums:
+            parts.append(f"EXISTING DEPARTMENT NUMBERS: {', '.join(dept_nums)} (use a different number for new departments)")
+
+    if ctx.get("salary_types"):
+        st_lines = [f"  number={v['number']} id={v['id']} name={v['name']}" for v in ctx["salary_types"].values()]
+        parts.append("SALARY TYPES (use these exact IDs — do NOT GET /salary/type yourself):\n" + "\n".join(st_lines))
+
+    if ctx.get("payment_types"):
+        pt_lines = [f"  id={p['id']} description={p.get('description','')}" for p in ctx["payment_types"]]
+        parts.append("INVOICE PAYMENT TYPES:\n" + "\n".join(pt_lines))
+
+    if ctx.get("products"):
+        prod_lines = [f"  id={p['id']} number={p.get('number','')} name={p.get('name','')} priceExVat={p.get('priceExcludingVatCurrency','')}" for p in ctx["products"][:20]]
+        parts.append("EXISTING PRODUCTS (use existing if number/name matches — do NOT re-create):\n" + "\n".join(prod_lines))
+
+    if ctx.get("customers"):
+        cust_lines = [f"  id={c['id']} name={c.get('name','')} orgNr={c.get('organizationNumber','')}" for c in ctx["customers"][:20]]
+        parts.append("EXISTING CUSTOMERS (use existing if name/orgNr matches — do NOT re-create):\n" + "\n".join(cust_lines))
+
+    if ctx.get("suppliers"):
+        sup_lines = [f"  id={s['id']} name={s.get('name','')} orgNr={s.get('organizationNumber','')}" for s in ctx["suppliers"][:20]]
+        parts.append("EXISTING SUPPLIERS (use existing if name/orgNr matches — do NOT re-create):\n" + "\n".join(sup_lines))
+
+    if ctx.get("per_diem_rate_category_id"):
+        parts.append(f"PER DIEM RATE CATEGORY ID (for 2026): {ctx['per_diem_rate_category_id']} — use this in POST /travelExpense/perDiemCompensation")
+
+    if ctx.get("ledger_accounts"):
+        accts = ctx["ledger_accounts"]
+        lines = [f"  {num}: id={aid}" for num, aid in sorted(accts.items())]
+        parts.append("LEDGER ACCOUNT IDS (pre-fetched — use directly, do NOT GET /ledger/account yourself):\n" + "\n".join(lines))
+
+    return "\n\n".join(parts)
 
 
-def tripletex_delete(endpoint: str) -> str:
-    """Make a DELETE request to the Tripletex API to remove a resource.
+# ═══════════════════════════════════════════════
+# SYSTEM PROMPT
+# ═══════════════════════════════════════════════
 
-    Args:
-        endpoint: API endpoint path with ID, e.g. '/travelExpense/123'
+def build_system_prompt(company_id: int | None) -> str:
+    today = date.today().isoformat()
+    due = (date.today() + timedelta(days=30)).isoformat()
 
-    Returns:
-        JSON response confirming deletion
-    """
-    ctx = _get_ctx()
-    ctx["call_count"] += 1
-    url = f"{ctx['base_url']}/{endpoint.lstrip('/')}"
-    resp = ctx["session"].delete(url)
-    if resp.status_code >= 400:
-        ctx["error_count"] += 1
-        log.error(f"DELETE {endpoint} → {resp.status_code}: {resp.text[:300]}")
-    else:
-        log.info(f"DELETE {endpoint} → {resp.status_code}")
-    return resp.text[:3000] if resp.text else '{"deleted": true}'
+    return f"""You are a Tripletex accounting API agent. Complete the given accounting task by calling the API.
+
+TODAY: {today}
+DEFAULT_DUE_DATE: {due}
+COMPANY_ID: {company_id or "unknown — call GET /token/session/>whoAmI to find it"}
+
+CRITICAL RULES:
+1. Pre-populated employees exist. If email ALREADY EXISTS in context → PUT /employee/ID with name from prompt + dateOfBirth FROM CONTEXT (keep existing, never use "1985-01-01"). Never create with modified email.
+2. Use EXACT values from prompt — never change names, numbers, dates, amounts, emails.
+3. Dates MUST be YYYY-MM-DD with leading zeros.
+4. Minimize API calls. Do NOT make verification GETs after successful creates.
+5. On 422: read validationMessages, fix the field. On 403: try once more, then skip.
+6. For PUT actions (/:payment, /:createCreditNote): parameters in query_params, NOT body.
+7. Never set "id"/"version" in POST. Use department/division/activity IDs from context directly.
+8. Per diem / daily allowance in travel expenses → use /travelExpense/perDiemCompensation (NOT /travelExpense/cost!)
+9. Salary: if /salary/transaction → 201, STOP. Do NOT also create manual voucher (causes duplicate postings).
+10. Prices in prompts are EXCLUDING VAT unless explicitly stated as "inkl. MVA" / "TTC" / "con IVA incluido".
+11. Do NOT invent data not in the prompt (e.g. departureFrom, phone numbers). Only use values explicitly stated.
+
+LANGUAGES: Prompts come in NO, EN, ES, PT, NN, DE, FR. Parse dates in any language to YYYY-MM-DD.
+
+═══ EMPLOYEE EMAIL HANDLING (MOST IMPORTANT) ═══
+Pre-populated employees exist in every sandbox. When creating an employee:
+1. CHECK the EXISTING EMPLOYEES list in the context below
+2. If the email from the task matches an existing employee → PUT /employee/ID with ALL fields from the prompt + version from context
+3. If no match → POST /employee as normal
+4. NEVER modify the email address. NEVER add "2" or any suffix.
+5. When doing PUT, include: firstName, lastName, email (unchanged!), userType, department, dateOfBirth (use "1985-01-01" if not in prompt), phoneNumberMobile (if in prompt), version
+
+═══ ENDPOINT REFERENCE ═══
+
+GET /token/session/>whoAmI → company ID
+
+── EMPLOYEE ──
+POST /employee {{firstName, lastName, email, userType:"STANDARD", department:{{id:X}}, phoneNumberMobile, dateOfBirth}}
+PUT /employee/ID {{firstName, lastName, email, userType, department:{{id:X}}, dateOfBirth, version:V}}
+- userType: "STANDARD" (normal), "EXTENDED" (for project managers/admins), "NO_ACCESS"
+- NEVER use "ADMINISTRATOR" as userType
+- dateOfBirth required if you need to create employment
+- Employee address uses "address" field: {{addressLine1, postalCode, city}} (NOT postalAddress like customer!)
+
+── EMPLOYMENT (for start date / salary tasks) ──
+Step 1: Create/update employee (with dateOfBirth!)
+Step 2: POST /employee/employment {{employee:{{id:X}}, startDate:"YYYY-MM-DD", division:{{id:DIVISION_ID}}, isMainEmployer:true, taxDeductionCode:"loennFraHovedarbeidsgiver"}}
+  If no division exists: POST /division {{name:"Hovedkontor", startDate:"{today}", municipality:{{id:262}}, organizationNumber:"996757435"}}
+Step 3 (if salary/details needed): POST /employee/employment/details {{employment:{{id:X}}, date:"{today}", employmentType:"ORDINARY", employmentForm:"PERMANENT", remunerationType:"MONTHLY_WAGE", workingHoursScheme:"NOT_SHIFT", percentageOfFullTimeEquivalent:100}}
+
+── ADMIN EMPLOYEE ──
+POST /employee {{userType:"EXTENDED"}} → POST /employee/entitlement {{employee:{{id:X}}, entitlementId:1, customer:{{id:{company_id or 'COMPANY_ID'}}}}}
+
+── CUSTOMER ──
+POST /customer {{name, organizationNumber, email, phoneNumber, isCustomer:true, postalAddress:{{addressLine1, postalCode, city}}}}
+- postalAddress.addressLine1 (NOT address1!)
+- phoneNumber (NOT phoneNumberMobile for customers)
+
+── SUPPLIER ──
+POST /customer {{name, organizationNumber, email, phoneNumber, isCustomer:false, isSupplier:true, postalAddress:{{addressLine1, postalCode, city}}}}
+- IMPORTANT: Create suppliers via POST /customer with isSupplier:true (NOT POST /supplier!)
+- This ensures the supplier is visible on both /customer and /supplier endpoints
+
+── CONTACT PERSON ──
+POST /customer (create customer first) → POST /contact {{firstName, lastName, email, phoneNumberMobile, customer:{{id:X}}}}
+
+── PRODUCT ──
+POST /product {{name, number:"STRING!", priceExcludingVatCurrency:X, priceIncludingVatCurrency:Y, vatType:{{id:Z}}}}
+- number is STRING (e.g. "7898"), not integer
+- priceExcludingVatCurrency (NOT priceExcludingVat!)
+- ALWAYS set vatType explicitly! Default is id 6 (0%) which is wrong for most products
+- VAT IDs: 3=25%, 31=15%, 32=12%, 5=0% (innenfor MVA), 6=0% (utenfor)
+- Calculate: priceIncludingVatCurrency = priceExcludingVatCurrency × (1 + vatPct/100)
+
+── DEPARTMENT ──
+POST /department {{name, departmentNumber:INT}}
+- departmentNumber must be unique integer — check existing numbers in context
+
+── INVOICE (multi-step) ──
+Bank account is pre-registered. Steps:
+1. POST /customer
+2. POST /product (ALWAYS set vatType:{{id:3}} for 25% MVA unless specified otherwise)
+   - If product number already exists: GET /product?number=XXXX&fields=id,name,number,priceExcludingVatCurrency to find the existing one
+3. POST /order {{customer:{{id:X}}, deliveryDate:"{today}", orderDate:"{today}", isPrioritizeAmountsIncludingVat:false}}
+4. POST /order/orderline {{order:{{id:X}}, product:{{id:Y}}, count:N, unitPriceExcludingVatCurrency:PRICE, vatType:{{id:3}}}}
+   - ALWAYS set vatType on orderline too! It does NOT inherit from product
+   - unitPriceExcludingVatCurrency is REQUIRED on orderline
+5. POST /invoice {{invoiceDate:"{today}", invoiceDueDate:"{due}", orders:[{{id:X}}]}} query_params: sendToCustomer=false
+
+CRITICAL — PRICE INTERPRETATION:
+- Prices in the prompt are ALWAYS the price EXCLUDING VAT (eks. MVA) unless explicitly stated as "inkl. MVA" / "incl. VAT" / "TTC" / "con IVA incluido"
+- "28950 kr" without qualifier = 28950 kr EXCLUDING VAT
+- "28950 NOK sin IVA" / "hors TVA" / "ohne MwSt" / "sem IVA" = EXCLUDING VAT
+- "28950 NOK con IVA" / "TTC" / "inkl. MVA" / "mit MwSt" = INCLUDING VAT
+- unitPriceExcludingVatCurrency on orderline = the price EXCLUDING VAT from the prompt
+- priceExcludingVatCurrency on product = same price EXCLUDING VAT
+- priceIncludingVatCurrency on product = priceExcludingVatCurrency × 1.25 (for 25% VAT)
+- paidAmount on /:payment = TOTAL INCLUDING VAT (sum of all orderlines × 1.25)
+
+── INVOICE FIELDS (for GET) ──
+Valid: id,version,invoiceNumber,invoiceDate,invoiceDueDate,amount,amountCurrency,amountExcludingVat,amountExcludingVatCurrency,amountOutstanding,customer,orders
+INVALID: isPaid, amountIncludingVat, amountIncludingVatCurrency, amountOutstandingCurrency, payments
+GET /invoice REQUIRES: invoiceDateFrom=YYYY-MM-DD&invoiceDateTo=YYYY-MM-DD
+
+── INVOICE + PAYMENT ──
+After creating invoice:
+6. Use payment type ID from the INVOICE PAYMENT TYPES in context (do NOT GET /invoice/paymentType again)
+7. PUT /invoice/ID/:payment query_params: paymentDate={today}&paymentTypeId=ID&paidAmount=TOTAL_INCL_VAT
+- paidAmount MUST include VAT!
+
+── REVERSE PAYMENT ──
+1. GET /invoice?invoiceDateFrom=2020-01-01&invoiceDateTo=2027-01-01&fields=id,invoiceNumber,amount,amountOutstanding,customer
+2. PUT /invoice/ID/:payment query_params: paymentDate={today}&paymentTypeId=ID&paidAmount=-AMOUNT (negative to reverse)
+
+── CREDIT NOTE ──
+After creating invoice:
+6. PUT /invoice/ID/:createCreditNote query_params: date={today}&sendToCustomer=false
+
+── PROJECT ──
+1. Create employee with userType:"EXTENDED" (or PUT existing to EXTENDED)
+2. POST /employee/entitlement {{employee:{{id:X}}, entitlementId:45, customer:{{id:{company_id or 'COMPANY_ID'}}}}}
+3. POST /employee/entitlement {{employee:{{id:X}}, entitlementId:10, customer:{{id:{company_id or 'COMPANY_ID'}}}}}
+4. POST /customer (if needed)
+5. POST /project {{name, startDate:"{today}", projectManager:{{id:X}}, customer:{{id:Y}}}}
+- Do NOT set "number" — let auto-generate to avoid conflicts
+
+── PROJECT + FIXED PRICE ──
+After creating project:
+6. GET /project/ID?fields=id,version
+7. PUT /project/ID {{name, number, startDate, isFixedPrice:true, fixedprice:AMOUNT, version:V, projectManager:{{id:X}}, customer:{{id:Y}}}}
+
+── TIMESHEET + PROJECT INVOICE ──
+Register hours and invoice for a project:
+1. Create employee (EXTENDED), entitlements, customer, project (as above — do all in minimum calls)
+2. Use activity ID from the AVAILABLE ACTIVITIES in context (do NOT call /activity again)
+3. POST /timesheet/entry {{project:{{id:X}}, activity:{{id:Y}}, employee:{{id:Z}}, date:"{today}", hours:N}}
+4. Create invoice: total = hours × hourlyRate
+   a. POST /product {{name:"Hours", number:"HRS1", priceExcludingVatCurrency:TOTAL, priceIncludingVatCurrency:TOTAL*1.25, vatType:{{id:3}}}}
+   b. POST /order {{customer:{{id:Y}}, project:{{id:Z}}, deliveryDate:"{today}", orderDate:"{today}", isPrioritizeAmountsIncludingVat:false}}
+   c. POST /order/orderline {{order:{{id:X}}, product:{{id:Y}}, count:1, unitPriceExcludingVatCurrency:TOTAL, vatType:{{id:3}}}}
+   d. POST /invoice {{invoiceDate:"{today}", invoiceDueDate:"{due}", orders:[{{id:X}}]}} query_params: sendToCustomer=false
+   IMPORTANT: ALWAYS set vatType:{{id:3}} on BOTH product AND orderline!
+NOTE: /project/projectActivity does NOT have a "name" field. Use /activity for activities.
+NOTE: /projectInvoice does NOT exist. Always use order → orderline → invoice flow.
+
+── PROJECT + PARTIAL INVOICE ──
+After fixed price project:
+8. POST /product {{name:"Delbetaling", number:"DEL1", priceExcludingVatCurrency:PARTIAL_AMOUNT, priceIncludingVatCurrency:PARTIAL_AMOUNT*1.25, vatType:{{id:3}}}}
+   - PARTIAL_AMOUNT = fixedprice × percentage (e.g. 250000 × 0.25 = 62500)
+9. POST /order {{customer:{{id:Y}}, project:{{id:Z}}, deliveryDate:"{today}", orderDate:"{today}", isPrioritizeAmountsIncludingVat:false}}
+10. POST /order/orderline {{order:{{id:X}}, product:{{id:Y}}, count:1, unitPriceExcludingVatCurrency:PARTIAL_AMOUNT, vatType:{{id:3}}}}
+    CRITICAL: vatType:{{id:3}} is REQUIRED on orderline — without it, invoice has 0% VAT!
+11. POST /invoice {{invoiceDate:"{today}", invoiceDueDate:"{due}", orders:[{{id:X}}]}} query_params: sendToCustomer=false
+
+── TRAVEL EXPENSE ──
+1. Create/update employee (if needed)
+2. POST /travelExpense {{employee:{{id:X}}, title:"...", travelDetails:{{departureDate:"YYYY-MM-DD", returnDate:"YYYY-MM-DD", departureFrom:"CITY_FROM_PROMPT", destination:"CITY_FROM_PROMPT", purpose:"PURPOSE_FROM_PROMPT"}}}}
+- Dates go INSIDE travelDetails, NOT flat!
+- travelDetails with departureFrom/destination/purpose = type 0 (travel)
+- ONLY set departureFrom/destination if mentioned in prompt — do NOT invent cities
+3. For per diem / daily allowance ("dagpenger", "diett", "ajudas de custo", "per diem", "daily rate"):
+   Use PER DIEM RATE CATEGORY ID from context (pre-fetched, do NOT search yourself).
+   POST /travelExpense/perDiemCompensation {{travelExpense:{{id:X}}, rateCategory:{{id:RATE_CATEGORY_ID_FROM_CONTEXT}}, count:NUM_DAYS, rate:DAILY_RATE, overnightAccommodation:"HOTEL", location:"DESTINATION_CITY"}}
+   - DAILY_RATE = the exact daily rate from prompt (e.g. 800)
+   - count = number of days from prompt
+   - location = destination city from prompt
+   - Do NOT use /travelExpense/cost for per diem! Use /travelExpense/perDiemCompensation!
+4. For regular expenses (flight, taxi, hotel costs etc.):
+   GET /travelExpense/costCategory?fields=id,description&count=50
+   GET /travelExpense/paymentType?fields=id,description&count=5
+   POST /travelExpense/cost {{travelExpense:{{id:X}}, costCategory:{{id:Y}}, paymentType:{{id:Z}}, amountCurrencyIncVat:AMOUNT, currency:{{id:1}}, date:"YYYY-MM-DD"}}
+   - Use "costCategory" NOT "category"
+   - Use "comments" NOT "description" for cost line text
+   - Match costCategory by description: "Fly", "Hotell", "Taxi", "Mat", "Parkering", etc.
+
+── DELETE TRAVEL EXPENSE ──
+1. GET /travelExpense?fields=id,title&count=100
+2. DELETE /travelExpense/ID (for each matching)
+
+── SALARY / PAYROLL ──
+Step 1: Find employee by email in EXISTING EMPLOYEES context.
+   - PUT /employee/ID with firstName, lastName from prompt + dateOfBirth FROM CONTEXT (NEVER use "1985-01-01"!) + version from context
+   - KEEP the existing dateOfBirth value shown in context!
+Step 2: Check if employee already has employment (hasEmployment=YES in context).
+   - If YES → SKIP Steps 3-4, use existing employmentId and divisionId
+   - If NO → create division + employment + details as below
+Step 3 (only if hasEmployment=NO): POST /division + POST /employee/employment + POST /employee/employment/details
+Step 4: POST /salary/transaction with salary specifications:
+   POST /salary/transaction query_params: generateTaxDeduction=true
+   Body: {{date:"{today}", month:3, year:2026, payslips:[{{
+     employee:{{id:EMP_ID}}, date:"{today}", year:2026, month:3,
+     specifications:[
+       {{salaryType:{{id:SALARY_TYPE_2000_ID}}, rate:BASE_SALARY, count:1, amount:BASE_SALARY}},
+       {{salaryType:{{id:SALARY_TYPE_2002_ID}}, rate:BONUS, count:1, amount:BONUS}}
+     ]
+   }}]}}
+   - Use salary type IDs from SALARY TYPES in context (2000=Fastlønn, 2002=Bonus)
+   - If salary/transaction → 201, STOP. Do NOT also create a manual voucher!
+   - If salary/transaction → 403, fall back to voucher: POST /ledger/voucher with postings on account 5000 (debit) and 1920 (credit) using LEDGER ACCOUNT IDS from context
+
+── VOUCHER / JOURNAL ENTRY ──
+1. GET /ledger/account?fields=id,number,name&number=NNNN (search by account number)
+2. POST /ledger/voucher {{date:"{today}", description:"...", postings:[
+     {{account:{{id:DEBIT_ACCT}}, amountGross:AMOUNT, amountGrossCurrency:AMOUNT, date:"{today}", row:1, vatType:{{id:0}}}},
+     {{account:{{id:CREDIT_ACCT}}, amountGross:-AMOUNT, amountGrossCurrency:-AMOUNT, date:"{today}", row:2, vatType:{{id:0}}}}
+   ]}}
+- Postings MUST balance (sum of amountGross = 0)
+- Use amountGross (positive=debit, negative=credit), NOT debitAmount/creditAmount
+- "row" field is REQUIRED on each posting (1, 2, 3...)
+- Customer accounts (1500-1599) require customer:{{id:X}} in the posting
+- Supplier accounts (2400-2499) are "system-generated" — use 4310 or similar instead
+- vatType {{id:0}} = no VAT handling (for manual journal entries)
+
+── ACCOUNTING DIMENSIONS ──
+1. POST /ledger/accountingDimensionName {{dimensionName:"...", description:"..."}}
+   Response contains dimensionIndex (auto-assigned)
+2. POST /ledger/accountingDimensionValue {{displayName:"...", number:1, dimensionIndex:X}} (for each value)
+3. Link voucher posting to dimension: freeAccountingDimension1:{{id:VALUE_ID}} (for dimensionIndex 1)
+   NEVER use "dimensions", "dimension1", or "accountingDimensionValue" on postings
+
+── SUPPLIER INVOICE / INCOMING INVOICE ──
+1. POST /customer {{name, organizationNumber, email, phoneNumber, isCustomer:false, isSupplier:true}} (creates supplier visible on both endpoints)
+2. GET /ledger/account?number=NNNN&fields=id,number,name (find expense account ID)
+3. POST /incomingInvoice query_params: sendTo=ledger
+   Body format (IMPORTANT — uses wrapper objects, NOT flat fields!):
+   {{
+     "invoiceHeader": {{
+       "vendorId": SUPPLIER_ID_AS_INTEGER,
+       "invoiceDate": "YYYY-MM-DD",
+       "dueDate": "YYYY-MM-DD",
+       "currencyId": 1,
+       "invoiceAmount": AMOUNT_INCL_VAT,
+       "description": "Invoice description",
+       "invoiceNumber": "INV-XXXX"
+     }},
+     "orderLines": [{{
+       "externalId": "line1",
+       "row": 1,
+       "description": "Line description",
+       "accountId": EXPENSE_ACCOUNT_ID_AS_INTEGER,
+       "amountInclVat": AMOUNT_INCL_VAT,
+       "vatTypeId": 3,
+       "count": 1
+     }}]
+   }}
+- vendorId is INTEGER (not {{id:X}} object!)
+- accountId is INTEGER (not {{id:X}} object!)
+- vatTypeId is INTEGER (not {{id:X}} object!)
+- For 25% VAT: vatTypeId=3, amountInclVat=total incl VAT (Tripletex auto-calculates VAT split)
+- If 403 on /incomingInvoice: module unavailable. Fall back to VOUCHER approach:
+  Use LEDGER ACCOUNT IDS from context for 2710 and 2400 (pre-fetched, do NOT GET them yourself).
+  Only GET the expense account if it's not 5000/1920/2710/2400 (which are already in context).
+  a. Expense account ID: GET /ledger/account?number=EXPENSE_ACCT&fields=id (e.g. 6860, 7300)
+  b. Account 2710 ID: use ACCT_2710_ID from context
+  c. Account 2400 ID: use ACCT_2400_ID from context
+  d. POST /ledger/voucher with postings:
+     - Expense account: amountGross = amount_excl_vat (positive/debit)
+     - Account 2710: amountGross = vat_amount (positive/debit)
+     - Account 2400: amountGross = -amount_incl_vat (negative/credit), supplier:{{id:SUPPLIER_ID}}
+     All postings need row, vatType:{{id:0}}, date
+  e. Calculate: amount_excl_vat = amount_incl_vat / 1.25, vat_amount = amount_incl_vat - amount_excl_vat
+
+── UPDATE EXISTING RESOURCE ──
+1. GET /resource?fields=id,name,version (search)
+2. GET /resource/ID?fields=* (get full object with version)
+3. PUT /resource/ID {{...updated fields..., version:V}}
+
+── DELETE RESOURCE ──
+1. GET /resource?fields=id,name (search)
+2. DELETE /resource/ID
+
+═══ PRE-POPULATED DATA ═══
+Fresh sandboxes come with pre-populated employees, products, and customers.
+- Employees: checked in EXISTING EMPLOYEES context (use PUT to update)
+- Products: if POST fails with "number already exists" or "name already exists":
+  → GET /product?number=XXXX&fields=id,name,number,priceExcludingVatCurrency — use the existing product ID
+  → Set the PROMPT's price on the orderline (unitPriceExcludingVatCurrency), ignore the product's stored price
+- Customers: if POST fails with duplicate:
+  → GET /customer?name=XXXX&fields=id,name,organizationNumber — use existing customer ID
+
+═══ ERROR HANDLING ═══
+- 422: Read validationMessages carefully. Fix the specific field mentioned.
+- 401: Token invalid — stop immediately.
+- 403: Could be module unavailable OR token expiry. Try ONE more time. If still 403, skip and create partial resources.
+- 404: Wrong endpoint — check the path.
+- 409: Version conflict — GET fresh version, retry PUT.
+- Duplicate (email/number): GET existing resource by email/number/name, use its ID. NEVER modify the email/number.
+- "Nummeret er allerede i bruk" for products: GET /product?number=XXXX to find existing, use its ID.
+- "department.id må fylles ut": Use department ID from context.
+- IMPORTANT: Always include dateOfBirth in PUT for employees (use "1985-01-01" if not in prompt)."""
 
 
-# === PDF EXTRACTION ===
+# ═══════════════════════════════════════════════
+# FILE PROCESSING
+# ═══════════════════════════════════════════════
 
 def extract_pdf_text(data: bytes) -> str:
-    """Extract text from PDF using pdfplumber, fallback to regex."""
+    """Extract text from PDF using pdfplumber."""
     try:
         import pdfplumber
         with pdfplumber.open(io.BytesIO(data)) as pdf:
-            pages = []
+            parts = []
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    pages.append(text)
-                # Also try tables
-                tables = page.extract_tables()
-                for table in tables:
+                    parts.append(text)
+                for table in page.extract_tables():
                     for row in table:
                         if row:
-                            pages.append(" | ".join(str(c) for c in row if c))
-            if pages:
-                return "\n".join(pages)[:4000]
-    except ImportError:
-        log.warning("pdfplumber not installed, using regex fallback")
+                            parts.append(" | ".join(str(c) for c in row if c))
+            if parts:
+                return "\n".join(parts)[:6000]
     except Exception as e:
         log.warning(f"pdfplumber failed: {e}")
-
-    # Fallback: regex on raw bytes
+    # Fallback: extract readable strings from raw bytes
     text = data.decode("latin-1", errors="ignore")
     readable = re.findall(r'[\w\s@.,;:!?/\\()-]{4,}', text)
-    return " ".join(readable)[:3000]
+    return " ".join(readable)[:4000]
 
 
-# === SYSTEM PROMPT ===
+def process_files(files: list) -> tuple[list[str], list[dict]]:
+    """Process attached files. Returns (text_parts, image_blocks)."""
+    text_parts = []
+    image_blocks = []
 
-SYSTEM_PROMPT = """You are a Tripletex accounting API agent. You receive accounting task prompts in various languages (Norwegian, English, Spanish, Portuguese, Nynorsk, German, French) and must complete them by calling the Tripletex API.
+    for f in files:
+        raw_b64 = f["content_base64"]
+        data = base64.b64decode(raw_b64)
+        filename = f["filename"]
+        mime = f.get("mime_type", "")
 
-CRITICAL RULES:
-1. EXTRACT EVERY DETAIL from the prompt: names, emails, dates, phone numbers, org numbers, addresses, amounts, roles. Missing fields = failed score.
-2. The Tripletex account starts EMPTY each time. Create all prerequisites before referencing them.
-3. Dates format: YYYY-MM-DD. Today: 2026-03-20.
-4. Read API responses carefully. Use actual IDs from responses in subsequent calls.
-5. If a call fails, read the error and fix your approach. NEVER repeat the same failing call.
-6. MINIMIZE API calls — efficiency is scored. Plan the full sequence before starting.
-7. When done, say "Task completed."
+        if mime.startswith("text") or filename.endswith((".csv", ".json", ".txt")):
+            try:
+                text_parts.append(f"File '{filename}':\n{data.decode('utf-8')[:8000]}")
+            except UnicodeDecodeError:
+                text_parts.append(f"File '{filename}': [binary data]")
+        elif mime == "application/pdf" or filename.endswith(".pdf"):
+            extracted = extract_pdf_text(data)
+            if extracted.strip():
+                text_parts.append(f"PDF '{filename}':\n{extracted}")
+        elif mime.startswith("image/"):
+            image_blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": raw_b64},
+            })
+            text_parts.append(f"[Image '{filename}' attached — visible to you]")
 
-=== STEP-BY-STEP RECIPES (follow these EXACTLY) ===
-
-RECIPE: CREATE EMPLOYEE WITH START DATE
-1. GET /department?fields=id,name&count=1 → save department_id
-2. POST /employee {"firstName":"X", "lastName":"Y", "email":"Z", "dateOfBirth":"YYYY-MM-DD", "userType":"STANDARD", "department":{"id": department_id}}
-   - dateOfBirth is REQUIRED for employment. Parse birth date from prompt (convert "6. March 1990" → "1990-03-06")
-   - Include phoneNumberMobile if phone number is in prompt
-3. POST /employee/employment {"employee":{"id": employee_id}, "startDate":"YYYY-MM-DD"}
-   - Do NOT include employmentType field
-
-RECIPE: CREATE CUSTOMER WITH ADDRESS
-1. POST /customer {"name":"X", "organizationNumber":"Y", "email":"Z", "isCustomer":true, "postalAddress":{"addressLine1":"Street 123", "postalCode":"0001", "city":"Oslo"}}
-   - Include ALL fields from prompt. Every missing field = lost points.
-
-RECIPE: CREATE SUPPLIER (leverandør/proveedor/fornecedor/fournisseur/Lieferant)
-1. POST /customer {"name":"X", "organizationNumber":"Y", "email":"Z", "isSupplier":true, "isCustomer":false}
-   - Suppliers use the /customer endpoint with isSupplier=true
-
-RECIPE: CREATE PRODUCT
-1. POST /product {"name":"X", "number":"Y", "priceExcludingVatCurrency": PRICE, "priceIncludingVatCurrency": PRICE*1.25, "vatType":{"id":3}}
-   - WRONG field name: priceExcludingVat → CORRECT: priceExcludingVatCurrency
-   - vatType id 3 = 25% MVA (standard Norwegian VAT)
-   - ALWAYS calculate and include priceIncludingVatCurrency = price × 1.25
-
-RECIPE: CREATE INVOICE
-1. POST /customer {"name":"X", "organizationNumber":"Y", "isCustomer":true}
-2. POST /product {"name":"PRODUCT_NAME", "priceExcludingVatCurrency": PRICE, "priceIncludingVatCurrency": PRICE*1.25, "vatType":{"id":3}}
-3. POST /order {"customer":{"id": customer_id}, "deliveryDate":"2026-03-20", "orderDate":"2026-03-20"}
-4. POST /order/orderline {"order":{"id": order_id}, "product":{"id": product_id}, "count":1}
-5. POST /invoice {"invoiceDate":"2026-03-20", "invoiceDueDate":"2026-04-20", "orders":[{"id": order_id}]}
-   - Order MUST have orderlines before creating invoice
-   - invoiceDueDate = invoiceDate + 30 days
-
-RECIPE: CREATE INVOICE AND REGISTER PAYMENT
-1-5. Follow INVOICE recipe above
-6. GET /invoice/paymentType?fields=id,description&count=5 → find a payment type ID
-7. PUT /invoice/{invoice_id}/:payment with query_params: "paymentDate=2026-03-20&paymentTypeId=PAYMENT_TYPE_ID&paidAmount=TOTAL_WITH_VAT"
-   - paidAmount must include VAT (amount × 1.25)
-
-RECIPE: CREATE PROJECT
-1. GET /department?fields=id,name&count=1 → save department_id
-2. POST /employee {"firstName":"X", "lastName":"Y", "email":"Z", "userType":"EXTENDED", "department":{"id": department_id}}
-   *** CRITICAL: Project manager MUST have userType="EXTENDED" — "STANDARD" will fail! ***
-3. POST /customer {"name":"COMPANY", "organizationNumber":"ORG_NR", "isCustomer":true}
-4. POST /project {"name":"PROJECT_NAME", "number":"1", "startDate":"2026-03-20", "projectManager":{"id": employee_id}, "customer":{"id": customer_id}}
-
-RECIPE: CREATE DEPARTMENTS
-1. POST /department {"name":"Dept1", "departmentNumber":1}
-2. POST /department {"name":"Dept2", "departmentNumber":2}
-3. POST /department {"name":"Dept3", "departmentNumber":3}
-   - Each department MUST have a unique departmentNumber (incrementing integers)
-
-RECIPE: CREATE TRAVEL EXPENSE (reiseregning)
-1. GET /department?fields=id,name&count=1 → save department_id
-2. POST /employee {"firstName":"X", "lastName":"Y", "email":"Z", "userType":"STANDARD", "department":{"id": department_id}}
-3. POST /travelExpense {"employee":{"id": employee_id}, "title":"TITLE", "travelDetails":{"departureDate":"YYYY-MM-DD", "returnDate":"YYYY-MM-DD"}}
-   - Dates go INSIDE travelDetails, NOT as flat fields
-
-RECIPE: DELETE TRAVEL EXPENSE
-1. GET /travelExpense?fields=id,title&count=100 → find the matching expense by title/employee
-2. DELETE /travelExpense/{id}
-
-RECIPE: CREATE CONTACT PERSON
-1. POST /customer {"name":"COMPANY", "isCustomer":true} (if customer doesn't exist)
-2. POST /contact {"firstName":"X", "lastName":"Y", "email":"Z", "customer":{"id": customer_id}}
-
-RECIPE: UPDATE EXISTING RESOURCE
-1. GET /endpoint?fields=id,...,version → find the resource and get its version
-2. PUT /endpoint/{id} with the updated fields AND the version field
-
-=== FIELD REFERENCE ===
-
-POST /employee: firstName, lastName, email, userType ("STANDARD"|"EXTENDED"|"NO_ACCESS"), department ({"id":N}), dateOfBirth ("YYYY-MM-DD"), phoneNumberMobile, phoneNumberHome, phoneNumberWork
-POST /customer: name, organizationNumber, email, phoneNumber, isCustomer (bool), isSupplier (bool), postalAddress ({"addressLine1":"..","postalCode":"..","city":".."})
-POST /product: name, number (str), priceExcludingVatCurrency (float), priceIncludingVatCurrency (float), vatType ({"id":3})
-POST /order: customer ({"id":N}), deliveryDate, orderDate
-POST /order/orderline: order ({"id":N}), product ({"id":N}), count (float)
-POST /invoice: invoiceDate, invoiceDueDate, orders ([{"id":N}])
-POST /project: name, number (str), startDate, projectManager ({"id":N}), customer ({"id":N})
-POST /department: name, departmentNumber (int, unique)
-POST /travelExpense: employee ({"id":N}), title, travelDetails ({"departureDate":"..","returnDate":".."})
-POST /contact: firstName, lastName, customer ({"id":N}), email
-POST /employee/employment: employee ({"id":N}), startDate
-
-=== ERROR RECOVERY ===
-- "email already exists" → GET /employee?email=X&fields=id to find existing. Use that ID.
-- "Feltet må fylles ut" → required field missing
-- "Produktnummeret er i bruk" → use a different product number
-- "Faktura kan ikke opprettes" → order is missing orderlines
-- "Oppgitt prosjektleder har ikke fått tilgang" → employee needs userType="EXTENDED", create a new one
-- "Verdien er ikke av korrekt type" for userType → only "STANDARD", "EXTENDED", "NO_ACCESS" are valid
-- "Numm..." for departmentNumber → use unique incrementing numbers
-- GET /invoice REQUIRES invoiceDateFrom and invoiceDateTo query params"""
+    return text_parts, image_blocks
 
 
-# === ENDPOINTS ===
+# ═══════════════════════════════════════════════
+# MAIN ENDPOINT
+# ═══════════════════════════════════════════════
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "v12", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
 @app.post("/")
 async def solve(request: Request):
     start_time = time.time()
-
     body = await request.json()
     prompt = body["prompt"]
     files = body.get("files", [])
     creds = body["tripletex_credentials"]
 
-    log.info(f"{'='*60}")
-    log.info(f"PROMPT: {prompt[:500]}")
+    log.info("=" * 60)
+    log.info(f"PROMPT: {prompt}")
+    log.info(f"FILES: {[f['filename'] for f in files]}")
 
-    # Thread-safe: store state in thread-local
-    ctx = {
-        "base_url": creds["base_url"].rstrip("/"),
-        "session": requests.Session(),
-        "call_count": 0,
-        "error_count": 0,
-    }
-    ctx["session"].auth = ("0", creds["session_token"])
-    ctx["session"].headers.update({"Content-Type": "application/json", "Accept": "application/json"})
-    _local.ctx = ctx
+    # Setup session with larger connection pool
+    base_url = creds["base_url"].rstrip("/")
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.auth = ("0", creds["session_token"])
+    session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
 
-    # Decode vedlegg
-    file_contents = []
-    for f in files:
-        data = base64.b64decode(f["content_base64"])
-        filename = f["filename"]
-        mime = f.get("mime_type", "")
-
-        if mime.startswith("text") or filename.endswith((".csv", ".json", ".txt")):
-            try:
-                file_contents.append(f"File '{filename}':\n{data.decode('utf-8')[:4000]}")
-            except UnicodeDecodeError:
-                file_contents.append(f"File '{filename}': [binary, {len(data)} bytes]")
-        elif mime == "application/pdf" or filename.endswith(".pdf"):
-            extracted = extract_pdf_text(data)
-            if extracted.strip():
-                file_contents.append(f"PDF '{filename}':\n{extracted}")
-            else:
-                file_contents.append(f"PDF '{filename}': [could not extract text, {len(data)} bytes]")
-        elif mime.startswith("image/"):
-            # Send image to Gemini vision for OCR
-            try:
-                vision_resp = gemini_client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=[
-                        {"text": "Extract ALL text, numbers, dates, names, amounts, and addresses from this image. Return the extracted data as structured text."},
-                        {"inline_data": {"mime_type": mime, "data": base64.b64encode(data).decode()}},
-                    ],
-                    config=GenerateContentConfig(temperature=0.0, max_output_tokens=2000),
-                )
-                ocr_text = vision_resp.text if vision_resp.text else ""
-                if ocr_text:
-                    file_contents.append(f"Image '{filename}' (OCR extracted):\n{ocr_text[:3000]}")
-                else:
-                    file_contents.append(f"Image '{filename}': [could not extract text]")
-            except Exception as e:
-                log.warning(f"Vision OCR failed for {filename}: {e}")
-                file_contents.append(f"Image '{filename}': [{mime}, {len(data)} bytes — OCR failed]")
-        else:
-            file_contents.append(f"File '{filename}': [{mime}, {len(data)} bytes]")
-
-    # Build user message
-    user_msg = f"Complete this accounting task:\n\n{prompt}"
-    if file_contents:
-        user_msg += "\n\nAttached files:\n" + "\n---\n".join(file_contents)
-
+    # Validate token + get company ID
+    company_id = None
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_msg,
-            config=GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                tools=[tripletex_get, tripletex_post, tripletex_put, tripletex_delete],
-                automatic_function_calling=AutomaticFunctionCallingConfig(
-                    maximum_remote_calls=30,
-                ),
-                temperature=0.1,
-                max_output_tokens=4096,
-            ),
-        )
-        log.info(f"Gemini response: {response.text[:300] if response.text else 'no text'}")
-        log.info(f"API calls: {ctx['call_count']}, errors: {ctx['error_count']}")
-
+        resp = session.get(f"{base_url}/token/session/>whoAmI", timeout=10)
+        if resp.status_code == 200:
+            company_id = resp.json().get("value", {}).get("company", {}).get("id")
+            log.info(f"Token OK. Company: {company_id}")
+        else:
+            log.error(f"Token validation failed: {resp.status_code}")
     except Exception as e:
-        log.error(f"Agent error: {e}")
-        log.error(traceback.format_exc())
+        log.warning(f"Token check error: {e}")
+
+    # Pre-setup: Register bank account so invoices can be created
+    try:
+        resp = session.get(f"{base_url}/ledger/account", params={"number": "1920", "fields": "id,version,bankAccountNumber"}, timeout=10)
+        if resp.status_code == 200:
+            accounts = resp.json().get("values", [])
+            if accounts and not accounts[0].get("bankAccountNumber"):
+                acct = accounts[0]
+                session.put(f"{base_url}/ledger/account/{acct['id']}", json={
+                    "id": acct["id"], "version": acct["version"],
+                    "number": 1920, "name": "Bankinnskudd",
+                    "bankAccountNumber": "12345678903", "isBankAccount": True,
+                }, timeout=10)
+                log.info("Bank account registered on 1920")
+    except Exception as e:
+        log.warning(f"Bank setup: {e}")
+
+    # Pre-fetch context (employees, departments, divisions, activities)
+    ctx = prefetch_context(session, base_url)
+    ctx_text = format_prefetched_context(ctx)
+
+    # Process files
+    text_parts, image_blocks = process_files(files)
+    file_text = "\n---\n".join(text_parts) if text_parts else ""
+
+    # Build user message with pre-fetched context
+    user_text = f"Complete this accounting task:\n\n{prompt}"
+    if file_text:
+        user_text += f"\n\nAttached files:\n{file_text}"
+    if ctx_text:
+        user_text += f"\n\n═══ PRE-FETCHED SANDBOX DATA ═══\n{ctx_text}"
+
+    content_blocks = [{"type": "text", "text": user_text}]
+    content_blocks.extend(image_blocks)
+
+    # Build system prompt
+    system_prompt = build_system_prompt(company_id)
+
+    # Agent loop
+    messages = [{"role": "user", "content": content_blocks}]
+    trace = []
+    deadline = start_time + 270  # 30s buffer before 300s timeout
+
+    for iteration in range(20):
+        if time.time() > deadline:
+            log.warning(f"Deadline reached at iteration {iteration}")
+            break
+
+        try:
+            response = claude_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=2048,
+                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+                tools=TOOLS,
+                messages=messages,
+                temperature=0.0,
+            )
+        except Exception as e:
+            log.error(f"Claude API error: {e}")
+            break
+
+        if response.stop_reason == "tool_use":
+            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+
+            # Execute tools in parallel if multiple
+            if len(tool_blocks) > 1:
+                import concurrent.futures
+                def run_tool(block):
+                    log.info(f"Tool: {block.name}({json.dumps(block.input, ensure_ascii=False)[:800]})")
+                    result = execute_tool(block.name, block.input, session, base_url, trace, ctx)
+                    return {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                    tool_results = list(ex.map(run_tool, tool_blocks))
+            else:
+                tool_results = []
+                for block in tool_blocks:
+                    log.info(f"Tool: {block.name}({json.dumps(block.input, ensure_ascii=False)[:800]})")
+                    result = execute_tool(block.name, block.input, session, base_url, trace, ctx)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+
+            # Safety: too many errors
+            error_count = sum(1 for t in trace if t.get("status", 200) >= 400)
+            if error_count >= 15:
+                log.warning(f"Too many errors ({error_count}), stopping")
+                break
+        else:
+            # Claude is done
+            log.info(f"Claude finished at iteration {iteration}")
+            break
 
     elapsed = time.time() - start_time
-    log.info(f"=== DONE in {elapsed:.1f}s (calls={ctx['call_count']}, errors={ctx['error_count']}) ===")
+    total_calls = len(trace)
+    total_errors = sum(1 for t in trace if t.get("status", 200) >= 400)
+    log.info(f"=== DONE {elapsed:.1f}s calls={total_calls} errors={total_errors} ===")
 
-    # Log submission
-    try:
-        log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "prompt_preview": prompt[:200],
-            "files_count": len(files),
-            "api_calls": ctx["call_count"],
-            "api_errors": ctx["error_count"],
-            "elapsed_seconds": round(elapsed, 1),
-        }
-        with open(SUBMISSION_LOG_PATH, "a") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    # Log run
+    _log_run(prompt, files, trace, elapsed)
 
     return JSONResponse({"status": "completed"})
 
 
+def _log_run(prompt, files, trace, elapsed):
+    """Append run details to JSONL log."""
+    try:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": CLAUDE_MODEL,
+            "prompt": prompt[:500],
+            "files": [f["filename"] for f in files] if files and isinstance(files[0], dict) else [],
+            "api_calls": len(trace),
+            "api_errors": sum(1 for t in trace if t.get("status", 200) >= 400),
+            "elapsed_seconds": round(elapsed, 1),
+            "trace": trace,
+        }
+        with open(LOG_PATH, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 @app.get("/logs")
 def get_logs():
-    if not SUBMISSION_LOG_PATH.exists():
-        return {"logs": [], "count": 0}
-    lines = SUBMISSION_LOG_PATH.read_text().strip().split("\n")
-    entries = [json.loads(l) for l in lines[-50:] if l.strip()]
-    return {"logs": entries, "count": len(entries)}
+    """View recent submission logs."""
+    if not LOG_PATH.exists():
+        return {"runs": [], "count": 0}
+    lines = LOG_PATH.read_text().strip().split("\n")
+    entries = [json.loads(l) for l in lines if l.strip()]
+    return {"runs": entries[-50:], "count": len(entries)}
 
 
 if __name__ == "__main__":
