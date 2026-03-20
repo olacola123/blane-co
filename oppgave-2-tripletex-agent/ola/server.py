@@ -106,7 +106,15 @@ def execute_tool(name: str, input_data: dict, session: requests.Session, base_ur
             body["isSupplier"] = True
             if "isCustomer" not in body:
                 body["isCustomer"] = False
+            if body.get("organizationNumber"):
+                body["organizationNumber"] = body["organizationNumber"].replace(" ", "")
         log.info(f"Redirected POST /supplier → POST /customer with isSupplier:true")
+
+    # Intercept: POST /incomingInvoice → skip (always 403), force voucher fallback
+    if name == "tripletex_post" and "incomingInvoice" in endpoint:
+        log.info("Intercepted POST /incomingInvoice → returning 403 to force voucher fallback")
+        trace.append({"tool": name, "endpoint": endpoint, "status": 403, "error": "Module unavailable"})
+        return json.dumps({"status": 403, "message": "incomingInvoice module not available. Use voucher fallback with accounts 5000/2710/2400."})
 
     # Intercept: PUT /employee — preserve pre-fetched dateOfBirth if Claude uses "1985-01-01"
     if name == "tripletex_put" and "/employee/" in endpoint and body and ctx:
@@ -121,6 +129,12 @@ def execute_tool(name: str, input_data: dict, session: requests.Session, base_ur
                         break
             except (ValueError, TypeError):
                 pass
+
+    # Intercept: POST /employee — ensure realistic dateOfBirth
+    if name == "tripletex_post" and endpoint.strip("/") == "employee" and body:
+        if body.get("dateOfBirth") in (None, "1985-01-01", ""):
+            body["dateOfBirth"] = "1990-05-15"
+            log.info(f"Fixed POST /employee dateOfBirth to 1990-05-15")
 
     url = f"{base_url}/{endpoint.lstrip('/')}"
 
@@ -212,6 +226,8 @@ def prefetch_context(session: requests.Session, base_url: str) -> dict:
         ("acct_1920", "ledger/account", {"number": "1920", "fields": "id,number,name"}),
         ("acct_2710", "ledger/account", {"number": "2710", "fields": "id,number,name"}),
         ("acct_2400", "ledger/account", {"number": "2400", "fields": "id,number,name"}),
+        ("cost_categories", "travelExpense/costCategory", {"fields": "id,description", "count": "50"}),
+        ("travel_payment_types", "travelExpense/paymentType", {"fields": "id,description", "count": "5"}),
     ]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -248,16 +264,20 @@ def prefetch_context(session: requests.Session, base_url: str) -> dict:
                 ctx["suppliers"] = values
                 log.info(f"Pre-fetched {len(values)} suppliers")
             elif name == "rate_categories":
-                # Find 2026-valid overnight domestic per diem category
+                # Find 2026-valid per diem categories (overnight + day trip)
                 try:
                     for rc in values:
                         n = str(rc.get("name") or "")
                         fr = str(rc.get("fromDate") or "")
                         to = str(rc.get("toDate") or "")
-                        if "Overnatting" in n and "innland" in n and fr >= "2026" and to >= "2026":
-                            ctx["per_diem_rate_category_id"] = rc["id"]
-                            log.info(f"Per diem rate category: id={rc['id']} name={n}")
-                            break
+                        if fr >= "2026" and to >= "2026" and "innland" in n:
+                            if "Overnatting" in n and "per_diem_overnight_id" not in ctx:
+                                ctx["per_diem_overnight_id"] = rc["id"]
+                                ctx["per_diem_rate_category_id"] = rc["id"]  # backward compat
+                                log.info(f"Per diem overnight: id={rc['id']} name={n}")
+                            elif "Dag" in n and "per_diem_day_id" not in ctx:
+                                ctx["per_diem_day_id"] = rc["id"]
+                                log.info(f"Per diem day trip: id={rc['id']} name={n}")
                 except Exception as e:
                     log.warning(f"Rate category search failed: {e}")
             elif name.startswith("salary_"):
@@ -266,6 +286,10 @@ def prefetch_context(session: requests.Session, base_url: str) -> dict:
                     if "salary_types" not in ctx:
                         ctx["salary_types"] = {}
                     ctx["salary_types"][num] = {"id": values[0]["id"], "name": values[0].get("name", ""), "number": num}
+            elif name == "cost_categories":
+                ctx["cost_categories"] = values
+            elif name == "travel_payment_types":
+                ctx["travel_payment_types"] = values
             elif name.startswith("acct_"):
                 acct_num = name.split("_")[1]
                 if values:
@@ -363,13 +387,28 @@ def format_prefetched_context(ctx: dict) -> str:
         sup_lines = [f"  id={s['id']} name={s.get('name','')} orgNr={s.get('organizationNumber','')}" for s in ctx["suppliers"][:20]]
         parts.append("EXISTING SUPPLIERS (use existing if name/orgNr matches — do NOT re-create):\n" + "\n".join(sup_lines))
 
-    if ctx.get("per_diem_rate_category_id"):
+    if ctx.get("per_diem_overnight_id") or ctx.get("per_diem_day_id"):
+        pd_lines = []
+        if ctx.get("per_diem_overnight_id"):
+            pd_lines.append(f"  Overnight (overnatting innland): {ctx['per_diem_overnight_id']} — for trips WITH overnight stay")
+        if ctx.get("per_diem_day_id"):
+            pd_lines.append(f"  Day trip (dagsreise innland): {ctx['per_diem_day_id']} — for day trips WITHOUT overnight")
+        parts.append("PER DIEM RATE CATEGORY IDs (use in POST /travelExpense/perDiemCompensation):\n" + "\n".join(pd_lines))
+    elif ctx.get("per_diem_rate_category_id"):
         parts.append(f"PER DIEM RATE CATEGORY ID (for 2026): {ctx['per_diem_rate_category_id']} — use this in POST /travelExpense/perDiemCompensation")
 
     if ctx.get("ledger_accounts"):
         accts = ctx["ledger_accounts"]
         lines = [f"  {num}: id={aid}" for num, aid in sorted(accts.items())]
         parts.append("LEDGER ACCOUNT IDS (pre-fetched — use directly, do NOT GET /ledger/account yourself):\n" + "\n".join(lines))
+
+    if ctx.get("cost_categories"):
+        cc_lines = [f"  id={c['id']} desc={c.get('description','')}" for c in ctx["cost_categories"][:15]]
+        parts.append("TRAVEL EXPENSE COST CATEGORIES (pre-fetched — do NOT GET /travelExpense/costCategory yourself):\n" + "\n".join(cc_lines))
+
+    if ctx.get("travel_payment_types"):
+        tp_lines = [f"  id={t['id']} desc={t.get('description','')}" for t in ctx["travel_payment_types"][:5]]
+        parts.append("TRAVEL EXPENSE PAYMENT TYPES (pre-fetched — do NOT GET /travelExpense/paymentType yourself):\n" + "\n".join(tp_lines))
 
     return "\n\n".join(parts)
 
@@ -392,8 +431,8 @@ CRITICAL RULES:
 1. Pre-populated employees exist. If email ALREADY EXISTS in context → PUT /employee/ID with name from prompt + dateOfBirth FROM CONTEXT (keep existing, never use "1985-01-01"). Never create with modified email.
 2. Use EXACT values from prompt — never change names, numbers, dates, amounts, emails.
 3. Dates MUST be YYYY-MM-DD with leading zeros.
-4. Minimize API calls. Do NOT make verification GETs after successful creates.
-5. On 422: read validationMessages, fix the field. On 403: try once more, then skip.
+4. EFFICIENCY IS SCORED! Minimize API calls — NEVER make GETs for data that is already in the PRE-FETCHED CONTEXT below. Use IDs directly from context for: employees, departments, divisions, activities, payment types, products, customers, suppliers, salary types, ledger accounts, cost categories, travel payment types, per diem rate categories.
+5. On 422: read validationMessages, fix the field. On 403: skip immediately, use fallback.
 6. For PUT actions (/:payment, /:createCreditNote): parameters in query_params, NOT body.
 7. Never set "id"/"version" in POST. Use department/division/activity IDs from context directly.
 8. Per diem / daily allowance in travel expenses → use /travelExpense/perDiemCompensation (NOT /travelExpense/cost!)
@@ -547,8 +586,7 @@ After fixed price project:
    - location = destination city from prompt
    - Do NOT use /travelExpense/cost for per diem! Use /travelExpense/perDiemCompensation!
 4. For regular expenses (flight, taxi, hotel costs etc.):
-   GET /travelExpense/costCategory?fields=id,description&count=50
-   GET /travelExpense/paymentType?fields=id,description&count=5
+   Use TRAVEL EXPENSE COST CATEGORIES and PAYMENT TYPES from context (pre-fetched, do NOT GET them yourself!).
    POST /travelExpense/cost {{travelExpense:{{id:X}}, costCategory:{{id:Y}}, paymentType:{{id:Z}}, amountCurrencyIncVat:AMOUNT, currency:{{id:1}}, date:"YYYY-MM-DD"}}
    - Use "costCategory" NOT "category"
    - Use "comments" NOT "description" for cost line text
@@ -561,23 +599,25 @@ After fixed price project:
 ── SALARY / PAYROLL ──
 Step 1: Find employee by email in EXISTING EMPLOYEES context.
    - PUT /employee/ID with firstName, lastName from prompt + dateOfBirth FROM CONTEXT (NEVER use "1985-01-01"!) + version from context
-   - KEEP the existing dateOfBirth value shown in context!
 Step 2: Check if employee already has employment (hasEmployment=YES in context).
-   - If YES → SKIP Steps 3-4, use existing employmentId and divisionId
-   - If NO → create division + employment + details as below
+   - If YES → SKIP step 3, go straight to step 4
+   - If NO → create division + employment + details
 Step 3 (only if hasEmployment=NO): POST /division + POST /employee/employment + POST /employee/employment/details
-Step 4: POST /salary/transaction with salary specifications:
+Step 4: Try salary/transaction first:
    POST /salary/transaction query_params: generateTaxDeduction=true
-   Body: {{date:"{today}", month:3, year:2026, payslips:[{{
-     employee:{{id:EMP_ID}}, date:"{today}", year:2026, month:3,
+   Body: {{date:"{today}", month:{date.today().month}, year:{date.today().year}, payslips:[{{
+     employee:{{id:EMP_ID}}, date:"{today}", year:{date.today().year}, month:{date.today().month},
      specifications:[
        {{salaryType:{{id:SALARY_TYPE_2000_ID}}, rate:BASE_SALARY, count:1, amount:BASE_SALARY}},
        {{salaryType:{{id:SALARY_TYPE_2002_ID}}, rate:BONUS, count:1, amount:BONUS}}
      ]
    }}]}}
-   - Use salary type IDs from SALARY TYPES in context (2000=Fastlønn, 2002=Bonus)
    - If salary/transaction → 201, STOP. Do NOT also create a manual voucher!
-   - If salary/transaction → 403, fall back to voucher: POST /ledger/voucher with postings on account 5000 (debit) and 1920 (credit) using LEDGER ACCOUNT IDS from context
+   - If salary/transaction → 403, fall back to voucher IMMEDIATELY (do NOT retry):
+     POST /ledger/voucher with postings:
+     row 1: account 5000 (ACCT_5000_ID from context), amountGross = BASE_SALARY + BONUS (debit)
+     row 2: account 2780 (ACCT_2780_ID from context), amountGross = -(BASE_SALARY + BONUS) (credit)
+     Use LEDGER ACCOUNT IDS from context. Account 2780 = Skyldig lønn (NOT 1920 Bank!)
 
 ── VOUCHER / JOURNAL ENTRY ──
 1. GET /ledger/account?fields=id,number,name&number=NNNN (search by account number)
@@ -589,7 +629,7 @@ Step 4: POST /salary/transaction with salary specifications:
 - Use amountGross (positive=debit, negative=credit), NOT debitAmount/creditAmount
 - "row" field is REQUIRED on each posting (1, 2, 3...)
 - Customer accounts (1500-1599) require customer:{{id:X}} in the posting
-- Supplier accounts (2400-2499) are "system-generated" — use 4310 or similar instead
+- Supplier accounts (2400): allowed when you include supplier:{{id:X}} on the posting (required for supplier invoice vouchers)
 - vatType {{id:0}} = no VAT handling (for manual journal entries)
 
 ── ACCOUNTING DIMENSIONS ──
