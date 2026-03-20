@@ -16,12 +16,12 @@ class ProbabilityConfig:
     enable_temperature_scaling: bool = True
     enable_class_calibration: bool = True
     class_bias: tuple[float, ...] = (
-        0.08,
-        0.0,
-        -0.15,
-        -0.15,
-        -0.12,
-        0.06,
+        -0.18,  # empty: var +0.08, men empty er systematisk overpredikert — aggressiv korreksjon
+        0.0,    # settlement
+        -0.05,  # port: var -0.15, for aggressivt
+        -0.05,  # ruin: var -0.15, for aggressivt
+        0.08,   # forest: var -0.12, men forest er underpredikert
+        0.06,   # mountain
     )
     class_temperature: tuple[float, ...] = (
         0.82,
@@ -70,7 +70,7 @@ class QueryConfig:
     deliberate_repeat_after: int = 4
     repeat_target_coverage: float = 2.0
     max_repeat_share: float = 0.22
-    revisit_weight: float = 0.9
+    revisit_weight: float = 2.5   # var 0.9 — økt dramatisk for å faktisk revisit dynamiske soner
     candidate_limit: int = 36
 
 

@@ -1,18 +1,32 @@
 """
-Astar Island: Norse World Prediction
-=====================================
-Strategi:
-1. Hent initial state for alle 5 seeds
-2. Kjør 10 simulate-queries per seed med viewport-grid som dekker hele 40x40
-3. Aggreger observasjoner til sannsynlighetsfordelinger
-4. Floor 0.01, renormaliser, submit
+Ola's Astar Island Solver
+==========================
+Nøkkelinnsikter:
+1. simulate() bruker tilfeldig sim_seed — hvert kall er én stokastisk sample av slutttilstanden
+2. Fokuser queries på dynamiske soner (nær initielle settlements) — observer dem FLERE ganger
+3. Ocean/fjell er statiske → prediker med 99.5% sikkerhet
+4. Observerte celler → empirisk distribusjon fra counts
+5. Aldri 0.0 probabilitet
+
+Strategi (10 queries per seed):
+- Query 1: Stor viewport som dekker mest mulig av kartet
+- Query 2-7: Fokuserte viewports rundt settlement-klynger
+- Query 8-10: Revisit av mest usikre dynamiske soner
+
+Bruk:
+    export API_KEY='din-jwt-token'
+    cd oppgave-3-astar-island/ola
+    python solution.py
 """
+
+from __future__ import annotations
 
 import json
 import os
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -22,28 +36,40 @@ from urllib3.util.retry import Retry
 # === CONFIG ===
 BASE_URL = "https://api.ainm.no/astar-island"
 API_KEY = os.environ.get("API_KEY", "")
-ROUND_ID = None  # Auto-detect from /rounds
 
 MAP_W, MAP_H = 40, 40
 NUM_CLASSES = 6
-VIEWPORT_SIZE = 15
-MIN_PROB = 0.01
+MAX_VIEWPORT = 15
+MIN_PROB = 0.001   # sharp floor for observerte/statiske celler
+BASE_PROB = 0.01   # standard floor
 
-# Terrain type → prediction class mapping (from OPPGAVE.md)
-# 8 terrain types → 6 classes
-# Class 0: Empty/Ocean/Plains
-# Class 1: Settlements
-# Class 2: Ports
-# Class 3: Ruins
-# Class 4: Forests
-# Class 5: Mountains
+# Terrain codes → klasser
+# 10=Ocean→0, 11=Plains→0, 0=Empty→0, 1=Settlement→1, 2=Port→2, 3=Ruin→3, 4=Forest→4, 5=Mountain→5
+TERRAIN_TO_CLASS = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 0, 11: 0}
 
-# We'll discover the mapping from simulation data
+# Terrain-prior: hva forventer vi at en celle ender som gitt startterrenget?
+# Format: [empty, settlement, port, ruin, forest, mountain]
+# Basert på simuleringsreglene: settlements vokser, ports utvikles fra settlements ved kyst,
+# ruins oppstår fra kollaps, skog gjenreiser ruiner, fjell/hav er statiske
+TERRAIN_PRIOR = {
+    0:  [0.70, 0.08, 0.03, 0.06, 0.10, 0.03],  # Empty
+    10: [0.998, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005],  # Ocean — nesten alltid empty
+    11: [0.55, 0.18, 0.06, 0.08, 0.10, 0.03],  # Plains — mer dynamisk enn generic empty
+    1:  [0.15, 0.45, 0.18, 0.12, 0.07, 0.03],  # Settlement — kan forbli, vokse til port, kollapse
+    2:  [0.10, 0.25, 0.45, 0.10, 0.07, 0.03],  # Port — stabilt, kan kollapse
+    3:  [0.25, 0.15, 0.08, 0.30, 0.18, 0.04],  # Ruin — gjenreises eller skog
+    4:  [0.15, 0.12, 0.04, 0.08, 0.55, 0.06],  # Forest — stabilt, men kan ryddes
+    5:  [0.003, 0.001, 0.001, 0.001, 0.001, 0.993],  # Mountain — statisk
+}
+
 
 # === API CLIENT ===
 
 class AstarClient:
     def __init__(self):
+        if not API_KEY:
+            print("FEIL: Sett API_KEY=din-jwt-token")
+            sys.exit(1)
         self.session = requests.Session()
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
@@ -53,357 +79,397 @@ class AstarClient:
             "Authorization": f"Bearer {API_KEY}",
         })
 
-    def get(self, endpoint, params=None):
-        url = f"{BASE_URL}/{endpoint.lstrip('/')}"
-        r = self.session.get(url, params=params)
+    def get(self, path, params=None):
+        r = self.session.get(f"{BASE_URL}/{path.lstrip('/')}", params=params)
         r.raise_for_status()
         return r.json()
 
-    def post(self, endpoint, data):
-        url = f"{BASE_URL}/{endpoint.lstrip('/')}"
-        r = self.session.post(url, json=data)
+    def post(self, path, data):
+        r = self.session.post(f"{BASE_URL}/{path.lstrip('/')}", json=data)
         r.raise_for_status()
         return r.json()
 
+    def get_rounds(self):
+        return self.get("/rounds")
 
-def get_active_round(client):
-    """Hent aktiv runde."""
-    rounds = client.get("/rounds")
-    active = [r for r in rounds if r["status"] == "active"]
-    if not active:
-        print("INGEN aktive runder!")
-        sys.exit(1)
-    r = active[0]
-    print(f"Runde {r['round_number']}: {r['id']}")
-    print(f"  Kart: {r['map_width']}x{r['map_height']}")
-    print(f"  Stenger: {r['closes_at']}")
-    print(f"  Vekt: {r['round_weight']}")
-    return r
+    def get_round(self, round_id):
+        return self.get(f"/rounds/{round_id}")
 
+    def get_budget(self):
+        return self.get("/budget")
 
-def get_round_data(client, round_id):
-    """Hent initial state med alle seeds."""
-    data = client.get(f"/rounds/{round_id}")
-    return data
-
-
-def check_budget(client):
-    """Sjekk gjenværende queries."""
-    try:
-        budget = client.get("/budget")
-        print(f"Budget: {budget}")
-        return budget
-    except Exception as e:
-        print(f"Budget-sjekk feilet: {e}")
-        return None
-
-
-def generate_viewport_positions():
-    """
-    Generer 10 viewport-posisjoner som dekker hele 40x40.
-    3x3 grid = 9 viewports, pluss 1 ekstra i sentrum.
-    """
-    positions = []
-
-    # 3x3 grid med 15x15 viewports
-    # Steg: (40 - 15) / 2 = 12.5 → bruk 0, 12, 25 som start-x/y
-    starts = [0, 13, 25]  # 25 + 15 = 40, perfekt
-
-    for y in starts:
-        for x in starts:
-            positions.append((x, y))
-
-    # 10. query: sentrum for ekstra data på dynamisk område
-    positions.append((12, 12))  # Sentrum-ish
-
-    return positions
-
-
-def simulate_query(client, round_id, seed_index, x, y, width=VIEWPORT_SIZE, height=VIEWPORT_SIZE):
-    """Kjør én simuleringsquery."""
-    # Clamp viewport til kartkanter
-    x = min(x, MAP_W - width)
-    y = min(y, MAP_H - height)
-
-    payload = {
-        "round_id": round_id,
-        "seed_index": seed_index,
-        "viewport": {
-            "x": x,
-            "y": y,
-            "width": width,
-            "height": height,
-        }
-    }
-
-    result = client.post("/simulate", payload)
-    return result
-
-
-def parse_terrain_value(value):
-    """
-    Map terrain values til prediction classes.
-    Vi oppdager mappingen fra data, men starter med rimelige antakelser.
-    """
-    # Basert på initial state observasjoner:
-    # Verdier sett: 1, 2, 4, 5, 10, 11
-    # Mulige terrain types i simulator: ocean, plains, forest, mountain, settlement, port, ruins, empty
-
-    # Mapping basert på OPPGAVE.md klasser:
-    terrain_map = {
-        0: 0,   # Empty → class 0
-        1: 1,   # Settlement → class 1
-        2: 2,   # Port → class 2
-        3: 3,   # Ruins → class 3
-        4: 4,   # Forest → class 4
-        5: 5,   # Mountain → class 5
-        # Verdier fra initial grid som vi har sett
-        10: 0,  # Border/Ocean → class 0
-        11: 0,  # Land/Plains → class 0
-    }
-
-    return terrain_map.get(value, 0)  # Default til class 0
-
-
-def run_queries_for_seed(client, round_id, seed_index, positions):
-    """Kjør alle queries for én seed og returner observasjoner."""
-    # observations[y][x] = list of observed classes
-    observations = [[[] for _ in range(MAP_W)] for _ in range(MAP_H)]
-
-    for i, (vx, vy) in enumerate(positions):
-        print(f"  Seed {seed_index}, query {i+1}/10: viewport ({vx},{vy})")
-
-        try:
-            result = simulate_query(client, round_id, seed_index, vx, vy)
-
-            # Parse viewport-data
-            viewport_data = result.get("viewport", result.get("grid", result.get("terrain", result.get("data", []))))
-
-            if not viewport_data:
-                print(f"    WARN: Tom respons, keys: {list(result.keys())}")
-                # Dump respons for debugging
-                print(f"    Respons: {json.dumps(result)[:500]}")
-                continue
-
-            # Parse grid data
-            for dy, row in enumerate(viewport_data):
-                for dx, val in enumerate(row):
-                    map_x = vx + dx
-                    map_y = vy + dy
-                    if 0 <= map_x < MAP_W and 0 <= map_y < MAP_H:
-                        cls = parse_terrain_value(val)
-                        observations[map_y][map_x].append(cls)
-
-            print(f"    OK: {len(viewport_data)}x{len(viewport_data[0]) if viewport_data else 0} celler")
-
-        except requests.exceptions.HTTPError as e:
-            print(f"    FEIL: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"    Body: {e.response.text[:300]}")
-        except Exception as e:
-            print(f"    FEIL: {e}")
-
-        time.sleep(0.5)  # Rate limiting
-
-    return observations
-
-
-def build_predictions(observations_per_seed, initial_states=None):
-    """
-    Bygg prediction tensor fra observasjoner.
-    For celler med observasjoner: frekvensbasert distribusjon
-    For celler uten: uniform prior
-    """
-    predictions = {}
-
-    for seed_idx, observations in observations_per_seed.items():
-        pred = np.full((MAP_H, MAP_W, NUM_CLASSES), 1.0 / NUM_CLASSES)
-
-        for y in range(MAP_H):
-            for x in range(MAP_W):
-                obs = observations[y][x]
-                if obs:
-                    # Frekvensbasert med smoothing
-                    counts = np.zeros(NUM_CLASSES)
-                    for cls in obs:
-                        if 0 <= cls < NUM_CLASSES:
-                            counts[cls] += 1
-
-                    # Laplace smoothing
-                    counts += 0.5
-                    pred[y][x] = counts / counts.sum()
-
-        # Apply initial state info if available
-        if initial_states and seed_idx in initial_states:
-            pred = incorporate_initial_state(pred, initial_states[seed_idx])
-
-        # Floor og renormalisering
-        pred = apply_floor(pred)
-
-        predictions[seed_idx] = pred
-
-    return predictions
-
-
-def incorporate_initial_state(pred, initial_state):
-    """
-    Bruk initial state til å informere predictions.
-    Fjell og hav endres sjelden. Settlements er dynamiske.
-    """
-    grid = initial_state.get("grid", initial_state.get("terrain", []))
-    settlements = initial_state.get("settlements", [])
-
-    if grid:
-        for y, row in enumerate(grid):
-            for x, val in enumerate(row):
-                if y < MAP_H and x < MAP_W:
-                    # Fjell (5) og hav/border (10) endres sjelden
-                    if val == 5:  # Mountain
-                        pred[y][x] = np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.90])
-                    elif val == 10:  # Ocean/border
-                        pred[y][x] = np.array([0.90, 0.02, 0.02, 0.02, 0.02, 0.02])
-
-    return pred
-
-
-def apply_floor(pred, floor=MIN_PROB):
-    """Sett minimum probability og renormaliser."""
-    pred = np.maximum(pred, floor)
-    # Renormaliser langs klasse-aksen
-    sums = pred.sum(axis=2, keepdims=True)
-    pred = pred / sums
-    return pred
-
-
-def submit_predictions(client, round_id, predictions):
-    """Submit predictions for alle seeds."""
-    results = {}
-
-    for seed_idx, pred in sorted(predictions.items()):
-        print(f"\nSubmitter seed {seed_idx}...")
-
-        # Konverter til nested list
-        pred_list = pred.tolist()
-
-        # Verifiser format
-        assert len(pred_list) == MAP_H
-        assert len(pred_list[0]) == MAP_W
-        assert len(pred_list[0][0]) == NUM_CLASSES
-
-        # Sjekk at alle rader summerer til ~1.0
-        for y in range(MAP_H):
-            for x in range(MAP_W):
-                s = sum(pred_list[y][x])
-                assert abs(s - 1.0) < 0.02, f"Cell ({x},{y}) sums to {s}"
-
-        payload = {
+    def simulate(self, round_id, seed_index, x, y, w=MAX_VIEWPORT, h=MAX_VIEWPORT):
+        """Korrekt API-format: viewport_x/y/w/h (ikke nestet dict)."""
+        x = max(0, min(x, MAP_W - w))
+        y = max(0, min(y, MAP_H - h))
+        return self.post("/simulate", {
             "round_id": round_id,
-            "seed_index": seed_idx,
-            "prediction": pred_list,
-        }
+            "seed_index": seed_index,
+            "viewport_x": x,
+            "viewport_y": y,
+            "viewport_w": w,
+            "viewport_h": h,
+        })
 
+    def submit(self, round_id, seed_index, prediction):
+        return self.post("/submit", {
+            "round_id": round_id,
+            "seed_index": seed_index,
+            "prediction": prediction,
+        })
+
+    def get_my_rounds(self):
+        return self.get("/my-rounds")
+
+    def get_analysis(self, round_id, seed_index):
+        return self.get(f"/analysis/{round_id}/{seed_index}")
+
+
+# === OBSERVATION STORE ===
+
+class SeedObserver:
+    """Holder styr på observerte celler og bygger prediksjoner."""
+
+    def __init__(self, initial_grid, settlements):
+        self.grid = np.array(initial_grid, dtype=int)   # H×W terrengkoder
+        self.settlements = settlements                   # [{x, y, has_port, alive}]
+
+        # counts[y,x,c] = antall ganger celle (y,x) ble observert som klasse c
+        self.counts = np.zeros((MAP_H, MAP_W, NUM_CLASSES), dtype=float)
+        # observed[y,x] = antall ganger vi har observert denne cellen
+        self.observed = np.zeros((MAP_H, MAP_W), dtype=int)
+
+        # Forhåndsberegn statiske masker
+        self.ocean_mask = (self.grid == 10)
+        self.mountain_mask = (self.grid == 5)
+        self.static_mask = self.ocean_mask | self.mountain_mask
+
+        # Forhåndsberegn settlement-posisjoner
+        self.settlement_positions = [(s["x"], s["y"]) for s in settlements]
+
+    def add_observation(self, grid_data, viewport_x, viewport_y):
+        """Legg til observasjoner fra én simulate-respons."""
+        for dy, row in enumerate(grid_data):
+            for dx, val in enumerate(row):
+                y, x = viewport_y + dy, viewport_x + dx
+                if 0 <= y < MAP_H and 0 <= x < MAP_W:
+                    cls = TERRAIN_TO_CLASS.get(val, 0)
+                    self.counts[y, x, cls] += 1
+                    self.observed[y, x] += 1
+
+    def add_settlement_obs(self, settlements_data, viewport_x, viewport_y, viewport_w, viewport_h):
+        """Bruk settlement-attributter direkte: alive=False → ruin."""
+        for s in settlements_data:
+            x, y = s.get("x", -1), s.get("y", -1)
+            if not (0 <= x < MAP_W and 0 <= y < MAP_H):
+                continue
+            alive = s.get("alive", True)
+            has_port = s.get("has_port", False)
+            if not alive:
+                # Kollapsed settlement → ruin
+                self.counts[y, x, 3] += 2   # sterkt signal
+            elif has_port:
+                # Port
+                self.counts[y, x, 2] += 2
+            else:
+                # Aktiv settlement
+                self.counts[y, x, 1] += 2
+            self.observed[y, x] = max(self.observed[y, x], 1)
+
+    def build_prediction(self):
+        """
+        Bygg 40×40×6 prediksjon.
+
+        Prioritetsrekkefølge:
+        1. Ocean/fjell → hardkoder med 99.5% sikkerhet
+        2. Observerte celler (2+ ganger) → empirisk distribusjon med lite smoothing
+        3. Observerte celler (1 gang) → empirisk med mer smoothing
+        4. Uobserverte celler → terrain-prior
+        """
+        pred = np.zeros((MAP_H, MAP_W, NUM_CLASSES), dtype=float)
+
+        for y in range(MAP_H):
+            for x in range(MAP_W):
+                terrain_code = self.grid[y, x]
+                n_obs = self.observed[y, x]
+
+                if self.ocean_mask[y, x]:
+                    # Ocean: nesten alltid empty
+                    pred[y, x] = [0.994, 0.001, 0.001, 0.001, 0.001, 0.002]
+
+                elif self.mountain_mask[y, x]:
+                    # Fjell: statisk
+                    pred[y, x] = [0.001, 0.001, 0.001, 0.001, 0.001, 0.995]
+
+                elif n_obs >= 3:
+                    # Observert mange ganger → lav smoothing, sterk empirisk signal
+                    alpha = 0.15
+                    prior = np.array(TERRAIN_PRIOR.get(terrain_code, TERRAIN_PRIOR[11]))
+                    pred[y, x] = self.counts[y, x] + alpha * prior
+                    apply_floor(pred[y, x], MIN_PROB)
+
+                elif n_obs >= 1:
+                    # Observert én eller to ganger → medium smoothing
+                    alpha = 0.5 if n_obs == 1 else 0.25
+                    prior = np.array(TERRAIN_PRIOR.get(terrain_code, TERRAIN_PRIOR[11]))
+                    pred[y, x] = self.counts[y, x] + alpha * prior
+                    apply_floor(pred[y, x], MIN_PROB)
+
+                else:
+                    # Uobservert → terrain-prior
+                    prior = np.array(TERRAIN_PRIOR.get(terrain_code, TERRAIN_PRIOR[11]))
+                    pred[y, x] = prior
+                    apply_floor(pred[y, x], BASE_PROB)
+
+                # Normaliser
+                s = pred[y, x].sum()
+                if s > 0:
+                    pred[y, x] /= s
+                else:
+                    pred[y, x] = np.ones(NUM_CLASSES) / NUM_CLASSES
+
+        return pred
+
+
+def apply_floor(arr, floor):
+    np.maximum(arr, floor, out=arr)
+
+
+# === QUERY PLANNER ===
+
+def plan_queries(initial_grid, settlements, n_queries=10):
+    """
+    Plan viewport-posisjoner for å maksimere score.
+
+    Matematisk optimal strategi (fra scoring-analyse):
+    - 3×3 grid med x=[0,13,25], y=[0,13,25] → 100% coverage på 9 queries
+    - Viewport 15×15: 0-14, 13-27, 25-39 dekker hele 40×40 uten huller
+    - Resterende queries → revisit av mest dynamiske soner
+    """
+    # 3×3 grid = 100% coverage, 9 queries
+    coverage_viewports = []
+    for vy in [0, 13, 25]:
+        for vx in [0, 13, 25]:
+            coverage_viewports.append((vx, vy, 15, 15))
+
+    return coverage_viewports[:n_queries]
+
+
+def adaptive_revisit_queries(observer: SeedObserver, n=3):
+    """
+    Velg de beste revisit-viewportene basert på usikkerhet.
+    Prioriter dynamiske soner med høy entropi.
+    """
+    # Beregn usikkerhet per celle
+    # Høy usikkerhet = celle er observert men fremdeles ikke sikker
+    uncertainty = np.zeros((MAP_H, MAP_W), dtype=float)
+    for y in range(MAP_H):
+        for x in range(MAP_W):
+            if observer.static_mask[y, x]:
+                continue
+            if observer.observed[y, x] > 0:
+                # Entropi av empirisk distribusjon
+                p = observer.counts[y, x] + 0.1
+                p /= p.sum()
+                h = -np.sum(p * np.log(p + 1e-9))
+                uncertainty[y, x] = h * (1 + observer.observed[y, x])  # Bonus for celler vi vet er dynamiske
+
+    # Finn topp-N viewport-sentre basert på usikkerhet
+    viewports = []
+    temp_mask = np.zeros((MAP_H, MAP_W), dtype=bool)
+
+    for _ in range(n):
+        # Beregn sliding-window sum av usikkerhet
+        best_score = -1
+        best_viewport = None
+        stride = 5
+        for vy in range(0, MAP_H - 14, stride):
+            for vx in range(0, MAP_W - 14, stride):
+                region = uncertainty[vy:vy+15, vx:vx+15]
+                already_covered = temp_mask[vy:vy+15, vx:vx+15].mean()
+                score = region.mean() * (1 - 0.5 * already_covered)
+                if score > best_score:
+                    best_score = score
+                    best_viewport = (vx, vy, 15, 15)
+
+        if best_viewport:
+            viewports.append(best_viewport)
+            vx, vy, w, h = best_viewport
+            temp_mask[vy:vy+h, vx:vx+w] = True
+
+    return viewports
+
+
+# === SOLVER ===
+
+def solve_seed(client: AstarClient, round_id: str, seed_index: int,
+               seed_data: dict, total_queries: int = 10, submit: bool = True) -> dict:
+    """Løs én seed med optimal query-strategi."""
+    grid = seed_data.get("grid", [])
+    settlements = seed_data.get("settlements", [])
+
+    print(f"\n  Seed {seed_index}: {len(settlements)} initielle settlements")
+    observer = SeedObserver(grid, settlements)
+
+    # Del budget: 70% coverage, 30% revisit
+    coverage_queries = max(7, int(total_queries * 0.70))
+    revisit_queries = total_queries - coverage_queries
+
+    # Plan coverage queries
+    planned = plan_queries(grid, settlements, n_queries=coverage_queries)
+
+    queries_used = 0
+
+    # === Coverage fase ===
+    print(f"  Coverage fase: {len(planned)} queries")
+    for i, (vx, vy, vw, vh) in enumerate(planned):
         try:
-            result = client.post("/submit", payload)
-            score = result.get("score", "?")
-            print(f"  Seed {seed_idx}: score = {score}")
-            results[seed_idx] = result
-        except requests.exceptions.HTTPError as e:
-            print(f"  FEIL: {e}")
+            result = client.simulate(round_id, seed_index, vx, vy, vw, vh)
+            grid_data = result.get("grid", [])
+            if grid_data:
+                observer.add_observation(grid_data, vx, vy)
+                settlements_obs = result.get("settlements", [])
+                if settlements_obs:
+                    observer.add_settlement_obs(settlements_obs, vx, vy, vw, vh)
+            queries_used += 1
+            used = result.get("queries_used", "?")
+            print(f"    Q{i+1}: ({vx},{vy}) {vw}×{vh} → budget={used}")
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"    Q{i+1} FEIL: {e}")
             if hasattr(e, 'response') and e.response is not None:
-                print(f"  Body: {e.response.text[:500]}")
-            results[seed_idx] = {"error": str(e)}
+                print(f"    Body: {e.response.text[:200]}")
 
-    return results
+    # === Revisit fase ===
+    if revisit_queries > 0:
+        revisits = adaptive_revisit_queries(observer, n=revisit_queries)
+        print(f"  Revisit fase: {len(revisits)} queries")
+        for i, (vx, vy, vw, vh) in enumerate(revisits):
+            try:
+                result = client.simulate(round_id, seed_index, vx, vy, vw, vh)
+                grid_data = result.get("grid", [])
+                if grid_data:
+                    observer.add_observation(grid_data, vx, vy)
+                    settlements_obs = result.get("settlements", [])
+                    if settlements_obs:
+                        observer.add_settlement_obs(settlements_obs, vx, vy, vw, vh)
+                queries_used += 1
+                used = result.get("queries_used", "?")
+                print(f"    R{i+1}: ({vx},{vy}) revisit → budget={used}")
+                time.sleep(0.3)
+            except Exception as e:
+                print(f"    R{i+1} FEIL: {e}")
 
+    # Bygg prediksjon
+    pred = observer.build_prediction()
 
-def submit_uniform_baseline(client, round_id, num_seeds=5):
-    """Submit uniform prior som baseline — får score på tavla ASAP."""
-    print("\n=== BASELINE: Uniform prior (1/6 per klasse) ===")
+    coverage = (observer.observed > 0).sum() / (MAP_H * MAP_W)
+    mean_obs = observer.observed.mean()
+    print(f"  Coverage: {coverage:.1%}, mean observations/celle: {mean_obs:.2f}")
 
-    pred = np.full((MAP_H, MAP_W, NUM_CLASSES), 1.0 / NUM_CLASSES)
-    pred = apply_floor(pred)
+    if not submit:
+        return {"seed_index": seed_index, "coverage": coverage}
 
-    predictions = {i: pred.copy() for i in range(num_seeds)}
-    return submit_predictions(client, round_id, predictions)
+    # Submit
+    try:
+        resp = client.submit(round_id, seed_index, pred.tolist())
+        score = resp.get("score", "?")
+        print(f"  Seed {seed_index} score: {score}")
+        return {"seed_index": seed_index, "score": score, "coverage": coverage}
+    except Exception as e:
+        print(f"  Submit FEIL: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"  Body: {e.response.text[:300]}")
+        return {"seed_index": seed_index, "error": str(e)}
 
 
 def main():
     if not API_KEY:
-        print("FEIL: Sett API_KEY!")
-        print("  export API_KEY='din-nøkkel-her'")
+        print("FEIL: export API_KEY='din-jwt-token'")
+        print("Hent token: app.ainm.no → F12 → Application → Cookies → access_token")
         sys.exit(1)
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--round", default=None, help="Round ID (default: auto)")
+    parser.add_argument("--seeds", type=int, default=5, help="Antall seeds (default: 5)")
+    parser.add_argument("--queries", type=int, default=10, help="Queries per seed (default: 10)")
+    parser.add_argument("--no-submit", action="store_true", help="Ikke submit, bare observer")
+    parser.add_argument("--dry-run", action="store_true", help="Ingen API-kall, bare test")
+    args = parser.parse_args()
 
     client = AstarClient()
 
-    # 1. Finn aktiv runde
-    round_info = get_active_round(client)
-    round_id = round_info["id"]
+    # Budget-sjekk
+    try:
+        budget = client.get_budget()
+        print(f"Budget: {json.dumps(budget)}")
+    except Exception as e:
+        print(f"Budget-sjekk feilet: {e}")
 
-    # 2. Sjekk budget
-    budget = check_budget(client)
+    # Finn aktiv runde
+    rounds = client.get_rounds()
+    if not rounds:
+        print("Ingen runder tilgjengelig")
+        sys.exit(1)
 
-    # 3. Hent initial state
-    print("\n=== Henter initial state ===")
-    round_data = get_round_data(client, round_id)
+    if args.round:
+        round_id = args.round
+        round_data = client.get_round(round_id)
+    else:
+        # Bruk nyeste aktive runde
+        active = [r for r in rounds if isinstance(r, dict) and r.get("status") == "active"]
+        if not active:
+            active = rounds  # Ta siste uansett
+        latest = active[-1]
+        round_id = latest["id"] if isinstance(latest, dict) else latest
+        round_data = client.get_round(round_id)
 
-    # Debug: vis struktur
-    if isinstance(round_data, dict):
+    print(f"\nRunde: {round_id}")
+    print(f"Kart: {round_data.get('width', '?')}×{round_data.get('height', '?')}")
+    print(f"Stenger: {round_data.get('closes_at', '?')}")
+
+    if args.dry_run:
+        print("\n[DRY RUN] Ingen API-kall")
+        return
+
+    # Hent seeds
+    seeds_data = round_data.get("seeds", round_data.get("initial_states", []))
+    if not seeds_data:
+        print("FEIL: Ingen seeds i round data")
         print(f"Round data keys: {list(round_data.keys())}")
-        # Finn seeds/initial states
-        for key in round_data:
-            val = round_data[key]
-            if isinstance(val, list) and len(val) > 0:
-                print(f"  {key}: list med {len(val)} elementer")
-                if isinstance(val[0], dict):
-                    print(f"    Element keys: {list(val[0].keys())}")
-            elif isinstance(val, dict):
-                print(f"  {key}: dict med keys {list(val.keys())[:10]}")
+        sys.exit(1)
 
-    # Parse initial states
-    initial_states = {}
-    seeds_data = round_data.get("seeds", round_data.get("initial_states", round_data.get("states", [])))
-    if isinstance(seeds_data, list):
-        for i, state in enumerate(seeds_data):
-            initial_states[i] = state
-            print(f"  Seed {i}: {list(state.keys()) if isinstance(state, dict) else type(state)}")
+    print(f"\n{len(seeds_data)} seeds funnet")
 
-    # 4. Submit baseline FØRST
-    print("\n=== Steg 1: Baseline submission ===")
-    if "--skip-baseline" not in sys.argv:
-        baseline_results = submit_uniform_baseline(client, round_id)
+    results = []
+    for seed_index, seed_data in enumerate(seeds_data[:args.seeds]):
+        result = solve_seed(
+            client=client,
+            round_id=round_id,
+            seed_index=seed_index,
+            seed_data=seed_data,
+            total_queries=args.queries,
+            submit=not args.no_submit,
+        )
+        results.append(result)
+        time.sleep(0.5)
 
-    # 5. Kjør simulate queries
-    print("\n=== Steg 2: Simulate queries ===")
-    positions = generate_viewport_positions()
-    print(f"Viewport-posisjoner: {positions}")
-
-    observations_per_seed = {}
-    for seed_idx in range(5):
-        print(f"\n--- Seed {seed_idx} ---")
-        obs = run_queries_for_seed(client, round_id, seed_idx, positions)
-        observations_per_seed[seed_idx] = obs
-
-    # 6. Bygg prediksjoner
-    print("\n=== Steg 3: Bygg prediksjoner ===")
-    predictions = build_predictions(observations_per_seed, initial_states)
-
-    # 7. Submit forbedrede prediksjoner
-    print("\n=== Steg 4: Submit forbedrede prediksjoner ===")
-    results = submit_predictions(client, round_id, predictions)
-
-    # 8. Oppsummering
+    # Oppsummering
     print("\n=== OPPSUMMERING ===")
-    for seed_idx, result in sorted(results.items()):
-        score = result.get("score", result.get("error", "?"))
-        print(f"  Seed {seed_idx}: {score}")
+    scores = [r.get("score") for r in results if "score" in r]
+    for r in results:
+        score = r.get("score", r.get("error", "ingen score"))
+        print(f"  Seed {r['seed_index']}: {score}")
 
-    # Lagre resultater
-    with open("/Users/olatandberg/vault/Prosjekter/NM i AI/hovedkonkurranse/oppgave-3-astar-island/ola/results.json", "w") as f:
-        json.dump({
-            "round_id": round_id,
-            "results": {str(k): v for k, v in results.items()},
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }, f, indent=2, default=str)
+    # Lagre
+    out_path = Path(__file__).parent / "results.json"
+    out_path.write_text(json.dumps({
+        "round_id": round_id,
+        "results": results,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }, indent=2, default=str))
+    print(f"\nResultater lagret: {out_path}")
 
 
 if __name__ == "__main__":
