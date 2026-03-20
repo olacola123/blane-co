@@ -1,39 +1,27 @@
-# NM i AI 2026 — LIVE
-
-**Periode**: 19. mars kl 18:00 → 22. mars kl 15:00 (69 timer)
-**Premiepott**: 1,000,000 NOK (1.: 400k, 2.: 300k, 3.: 200k, U23: 100k)
+# NM i AI 2026 — Scoreboard
+Sist oppdatert: 2026-03-20 21:50
 
 ## Lag
-- **Ola** (olacola123)
-- **Joakim** (joakimotto)
-- **Mathea** (matheabrannstorph-commits)
+- **Ola** (olacola123) — Claude Code
+- **Joakim** (joakimotto) — Claude Code
+- **Mathea** (matheabrannstorph-commits) — Copilot
 
-## Oppgaver (33.33% vekt hver)
+## Oppgave 1 — Object Detection
+| # | Person | Score | Tilnærming | Tid |
+|---|--------|-------|-----------|-----|
+| 1 | mathea | 0.8654 | YOLOv8m imgsz=960 product images training, ONNX export, kun YOLO inference | 20:50 |
+| 2 | mathea | 0.64 |  | 22:48 |
 
-| # | Oppgave | Type | Scoring | Submit |
-|---|---------|------|---------|--------|
-| 1 | NorgesGruppen Data: Object Detection | ZIP-upload (kode) | Hybrid mAP@0.5 (70% detect + 30% classify) | app.ainm.no/submit/norgesgruppen-data |
-| 2 | Tripletex: AI Accounting Agent | HTTPS endpoint | 0-6.0 (korrekthet x tier x effektivitet) | app.ainm.no/submit/tripletex |
-| 3 | Astar Island: Norse World Prediction | REST API prediksjoner | KL Divergence 0-100 | app.ainm.no/submit/astar-island |
+## Oppgave 2 — Tripletex Agent
+Ingen scores ennå.
 
-## Scores
-| Oppgave | Ola | Joakim | Mathea | Best |
-|---------|-----|--------|--------|------|
-| 1 — Object Detection | — | — | — | — |
-| 2 — Tripletex Agent | — | — | — | — |
-| 3 — Astar Island | — | — | — | — |
+## Oppgave 3 — Astar Island
+Ingen scores ennå.
 
-## Scoring-system
-- Hvert tasks scores normaliseres 0-100 ved å dele på høyeste score i den oppgaven
-- Overall score = gjennomsnitt av de 3 normaliserte scorene
-- Manglende submissions = 0 poeng
+## Totalt (beste per oppgave)
+| Oppgave | Score | Person | Tilnærming |
+|---------|-------|--------|-----------|
+| 1 — Object Detection | 0.8654 | mathea | YOLOv8m imgsz=960 product images training, ONNX export, kun YOLO inference |
+| 2 — Tripletex Agent | — | — | — |
+| 3 — Astar Island | — | — | — |
 
-## Krav for premieutbetaling
-1. Vipps-verifisering (BankID)
-2. Offentlig kode-repo med MIT-lisens før deadline
-
-## Felles funn
-- Grocery Bot er KUN warm-up (ikke del av hovedkonkurransen)
-- MCP docs-server: `claude mcp add --transport http nmiai https://mcp-docs.ainm.no/mcp`
-- Tripletex API docs: https://kkpqfuj-amager.tripletex.dev/v2-docs/
-- Astar Island API: https://api.ainm.no/astar-island/

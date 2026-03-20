@@ -1,0 +1,2 @@
+{"oppgave": 1, "person": "mathea", "score": 0.64, "timestamp": "2026-03-19T22:48:00", "beskrivelse": "YOLOv8m 100 epochs, 248 bilder, ONNX export, mAP50 val=0.513"}
+{"person": "mathea", "score": 0.8654, "approach": "YOLOv8m imgsz=960 product images training, ONNX export, kun YOLO inference", "timestamp": "2026-03-20T20:50:49"}
