@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """
-Ola's Astar Island Nightbot — Selvforbedrende
-================================================
-Kjører automatisk, løser nye runder, og LÆRER av hver runde.
+Ola's Astar Island Nightbot v2 — Selvforbedrende nattdrift
+============================================================
 
-Syklus per runde:
-1. Ny runde oppdaget → kjør solver → submit
-2. Runden stenger → hent fasit (ground truth)
-3. Oppdater overgangstabellen med nye data
-4. Neste runde bruker bedre priors
+Arkitektur per runde:
+1. UMIDDELBAR SUBMIT: Prior-only for alle 5 seeds (sikkerhetsnett ~74)
+2. UTFORSKNING: Observer seed 0-1, inferér rundetype (mild/hard/reclaimation)
+3. INFORMERT: Observer seed 2-4 med justerte priors
+4. RESUBMIT: Alle seeds med observasjoner + justert prior
+5. ETTER RUNDEN: Hent fasit, rekalibrér, logg forbedring
 
-Jo flere runder, jo bedre priors → jo høyere score.
+Sikkerhet:
+- Prior-only submit FØRST → aldri under ~74 uansett hva som skjer
+- Observasjoner nudger forsiktig (alpha=15)
+- Krasj-sikker: state lagres etter hvert steg
+- Budget-sjekk: stopper hvis noen andre har brukt queries
 
 Bruk:
     export API_KEY='din-jwt-token'
-    python nightbot.py                     # Start bot
-    python nightbot.py --poll-interval 120 # Poll hvert 2 min
-    python nightbot.py --dry-run           # Ingen submit
-    python nightbot.py --max-rounds 3      # Stopp etter 3 runder
+    nohup python nightbot.py > nightbot_output.log 2>&1 &
+
+    # Sjekk status:
+    tail -f nightbot_output.log
+    cat nightbot_state.json | python -m json.tool
 """
 
 from __future__ import annotations
@@ -36,10 +41,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from solution import (
-    AstarClient, load_calibration, solve_round,
-    MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS,
-    DISTANCE_BANDS, PROB_FLOOR,
-    distance_to_nearest_settlement, get_distance_band, is_coastal,
+    AstarClient, load_calibration, SeedObserver,
+    build_cross_seed_prior, apply_cross_seed,
+    plan_queries,
+    MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS, PROB_FLOOR,
+    distance_to_nearest_settlement, get_distance_band, is_coastal, get_prior,
 )
 
 PROJECT_DIR = Path(__file__).parent
@@ -56,18 +62,24 @@ logger = logging.getLogger("ola-nightbot")
 
 def load_state():
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"solved_rounds": [], "scores": {}, "calibrated_rounds": []}
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {"solved_rounds": [], "scores": {}, "calibrated_rounds": [],
+            "total_rounds_solved": 0}
 
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2, default=str))
+    except Exception as e:
+        logger.error(f"Kunne ikke lagre state: {e}")
 
 
 # === ROUND FINDING ===
 
 def find_new_round(client, solved_rounds):
-    """Finn en aktiv runde vi ikke har løst."""
     try:
         rounds = client.get_rounds()
     except Exception as e:
@@ -75,95 +87,306 @@ def find_new_round(client, solved_rounds):
         return None, None
 
     solved_set = set(solved_rounds)
-
     for r in reversed(rounds):
         if not isinstance(r, dict):
             continue
-        rid = r.get("id", "")
-        status = r.get("status", "")
-
-        if status == "active" and rid not in solved_set:
+        if r.get("status") == "active" and r.get("id") not in solved_set:
             try:
-                round_data = client.get_round(rid)
-                return rid, round_data
+                return r["id"], client.get_round(r["id"])
             except Exception as e:
-                logger.error(f"Kunne ikke hente runde {rid[:12]}: {e}")
+                logger.error(f"Kunne ikke hente runde: {e}")
                 return None, None
-
     return None, None
 
 
-# === SELVFORBEDRING: REKALIBRERING ===
+# === ROUND-TYPE INFERENCE ===
+
+def infer_round_type(observers):
+    """
+    Analyser observasjoner fra seed 0-1 for å gjette rundetype.
+
+    Returnerer justeringsfaktorer for prioren:
+    - settlement_factor: >1 = flere settlements overlever enn normalt
+    - forest_factor: >1 = mer skog enn normalt
+    - ruin_factor: >1 = flere ruiner enn normalt
+    """
+    # Tell observerte klasser på tvers av seeds
+    total_counts = np.zeros(NUM_CLASSES, dtype=float)
+    total_cells = 0
+
+    for obs in observers:
+        for y in range(MAP_H):
+            for x in range(MAP_W):
+                if obs.static_mask[y, x] or obs.observed[y, x] == 0:
+                    continue
+                total_counts += obs.counts[y, x]
+                total_cells += obs.observed[y, x]
+
+    if total_cells < 100:
+        return {"settlement": 1.0, "forest": 1.0, "ruin": 1.0, "port": 1.0}
+
+    # Normaliser
+    fracs = total_counts / total_cells
+
+    # Sammenlign med historisk gjennomsnitt (fra kalibrering)
+    # Historisk: empty~72%, settlement~12%, port~1%, ruin~1.5%, forest~13%
+    hist_settlement = 0.12
+    hist_forest = 0.13
+    hist_ruin = 0.015
+    hist_port = 0.01
+
+    settlement_factor = (fracs[1] / hist_settlement) if hist_settlement > 0 else 1.0
+    forest_factor = (fracs[4] / hist_forest) if hist_forest > 0 else 1.0
+    ruin_factor = (fracs[3] / hist_ruin) if hist_ruin > 0 else 1.0
+    port_factor = (fracs[2] / hist_port) if hist_port > 0 else 1.0
+
+    # Clamp til rimelig range (0.5 - 2.0)
+    def clamp(v):
+        return max(0.5, min(2.0, v))
+
+    factors = {
+        "settlement": clamp(settlement_factor),
+        "forest": clamp(forest_factor),
+        "ruin": clamp(ruin_factor),
+        "port": clamp(port_factor),
+    }
+
+    logger.info(f"  Rundetype: sett={factors['settlement']:.2f}× "
+                f"forest={factors['forest']:.2f}× ruin={factors['ruin']:.2f}× "
+                f"port={factors['port']:.2f}×")
+
+    return factors
+
+
+def adjust_priors_for_round(observers, factors):
+    """Juster prior-cachen basert på infererte rundeparametere."""
+    class_factors = np.array([
+        1.0,                    # empty — justeres automatisk av normalisering
+        factors["settlement"],
+        factors["port"],
+        factors["ruin"],
+        factors["forest"],
+        1.0,                    # mountain — statisk
+    ])
+
+    for obs in observers:
+        for y in range(MAP_H):
+            for x in range(MAP_W):
+                if obs.static_mask[y, x]:
+                    continue
+                prior = obs._prior_cache[y, x].copy()
+                prior *= class_factors
+                prior = np.maximum(prior, PROB_FLOOR)
+                prior /= prior.sum()
+                obs._prior_cache[y, x] = prior
+
+
+# === TWO-PASS SOLVER ===
+
+def solve_round_two_pass(client, round_id, round_data, transition_table, simple_prior):
+    """
+    To-pass strategi:
+    1. Submit prior-only umiddelbart (sikkerhetsnett)
+    2. Observer, blend, resubmit
+    """
+    seeds_data = round_data.get("seeds", round_data.get("initial_states", []))
+    if not seeds_data:
+        logger.error(f"Ingen seeds i round data")
+        return []
+
+    n_seeds = len(seeds_data)
+    logger.info(f"{n_seeds} seeds")
+
+    # === PASS 1: Submit prior-only ===
+    logger.info("PASS 1: Submitter prior-only (sikkerhetsnett)...")
+    prior_scores = []
+    observers = []
+
+    for seed_idx in range(n_seeds):
+        seed = seeds_data[seed_idx]
+        grid = seed.get("grid", [])
+        settlements = seed.get("settlements", [])
+
+        obs = SeedObserver(grid, settlements, transition_table, simple_prior)
+        observers.append(obs)
+
+        pred = obs.build_prediction()
+        try:
+            resp = client.submit(round_id, seed_idx, pred.tolist())
+            score = resp.get("score", resp.get("seed_score", "?"))
+            prior_scores.append(score)
+            logger.info(f"  Seed {seed_idx} prior-only → {score}")
+            time.sleep(0.4)
+        except Exception as e:
+            logger.error(f"  Seed {seed_idx} submit feil: {e}")
+            prior_scores.append(None)
+
+    # === Sjekk budget ===
+    try:
+        budget = client.get_budget()
+        budget_used = budget.get("queries_used", 0)
+        budget_max = budget.get("queries_max", 50)
+        logger.info(f"Budget: {budget_used}/{budget_max}")
+        if budget_used >= budget_max:
+            logger.warning("Budget oppbrukt! Beholder prior-only.")
+            return [{"seed_index": i, "score": s, "method": "prior-only"}
+                    for i, s in enumerate(prior_scores)]
+        queries_available = budget_max - budget_used
+    except Exception:
+        queries_available = 50
+
+    # === PASS 2: Observer og resubmit ===
+    logger.info(f"\nPASS 2: Observer ({queries_available} queries tilgjengelig)...")
+
+    queries_per_seed = queries_available // n_seeds
+
+    if queries_per_seed < 3:
+        logger.warning(f"For få queries ({queries_per_seed}/seed). Beholder prior-only.")
+        return [{"seed_index": i, "score": s, "method": "prior-only"}
+                for i, s in enumerate(prior_scores)]
+
+    # Observer seed 0-1 først (utforskningsfase)
+    explore_seeds = min(2, n_seeds)
+    for seed_idx in range(explore_seeds):
+        seed = seeds_data[seed_idx]
+        grid = seed.get("grid", [])
+        settlements = seed.get("settlements", [])
+        viewports = plan_queries(grid, settlements, n_queries=queries_per_seed)
+
+        for i, (vx, vy, vw, vh) in enumerate(viewports):
+            try:
+                result = client.simulate(round_id, seed_idx, vx, vy, vw, vh)
+                grid_data = result.get("grid", [])
+                if grid_data:
+                    observers[seed_idx].add_observation(grid_data, vx, vy)
+                    sett_obs = result.get("settlements", [])
+                    if sett_obs:
+                        observers[seed_idx].add_settlement_obs(sett_obs)
+                used = result.get("queries_used", "?")
+                logger.info(f"  Seed {seed_idx} Q{i+1}: ({vx},{vy}) → {used}/{budget_max}")
+                time.sleep(0.25)
+            except Exception as e:
+                logger.error(f"  Seed {seed_idx} Q{i+1} feil: {e}")
+
+    # Inferér rundetype fra seed 0-1
+    factors = infer_round_type(observers[:explore_seeds])
+
+    # Juster priors for ALLE seeds basert på rundetype
+    adjust_priors_for_round(observers, factors)
+
+    # Observer seed 2-4 med justerte priors
+    for seed_idx in range(explore_seeds, n_seeds):
+        seed = seeds_data[seed_idx]
+        grid = seed.get("grid", [])
+        settlements = seed.get("settlements", [])
+        viewports = plan_queries(grid, settlements, n_queries=queries_per_seed)
+
+        for i, (vx, vy, vw, vh) in enumerate(viewports):
+            try:
+                result = client.simulate(round_id, seed_idx, vx, vy, vw, vh)
+                grid_data = result.get("grid", [])
+                if grid_data:
+                    observers[seed_idx].add_observation(grid_data, vx, vy)
+                    sett_obs = result.get("settlements", [])
+                    if sett_obs:
+                        observers[seed_idx].add_settlement_obs(sett_obs)
+                used = result.get("queries_used", "?")
+                logger.info(f"  Seed {seed_idx} Q{i+1}: ({vx},{vy}) → {used}/{budget_max}")
+                time.sleep(0.25)
+            except Exception as e:
+                logger.error(f"  Seed {seed_idx} Q{i+1} feil: {e}")
+
+    # Cross-seed learning
+    cross_table = build_cross_seed_prior(observers)
+    if cross_table:
+        logger.info(f"  Cross-seed: {len(cross_table)} kategorier")
+        apply_cross_seed(observers, cross_table, transition_table)
+
+    # Resubmit alle seeds
+    logger.info("\nResubmit med observasjoner...")
+    results = []
+    for seed_idx, obs in enumerate(observers):
+        pred = obs.build_prediction()
+        try:
+            resp = client.submit(round_id, seed_idx, pred.tolist())
+            score = resp.get("score", resp.get("seed_score", "?"))
+            prior_s = prior_scores[seed_idx]
+            improved = ""
+            if isinstance(score, (int, float)) and isinstance(prior_s, (int, float)):
+                diff = score - prior_s
+                improved = f" ({diff:+.1f} vs prior)"
+            logger.info(f"  Seed {seed_idx} → {score}{improved}")
+            results.append({
+                "seed_index": seed_idx,
+                "score": score,
+                "prior_score": prior_s,
+                "method": "observed+cross-seed",
+            })
+            time.sleep(0.4)
+        except Exception as e:
+            logger.error(f"  Seed {seed_idx} resubmit feil: {e}")
+            results.append({"seed_index": seed_idx, "score": prior_s, "method": "prior-only"})
+
+    return results
+
+
+# === REKALIBRERING ===
 
 def recalibrate(client, state):
-    """
-    Hent ground truth fra nye fullførte runder og OPPDATER calibration_data.json.
-
-    Dette er kjernen i selvforbedringen:
-    - Etter hver fullført runde henter vi fasiten
-    - Vi beregner nye overgangstabeller fra ALL tilgjengelig data
-    - Neste runde bruker oppdaterte priors
-    """
+    """Hent fasit fra nye fullførte runder og oppdater kalibrering."""
     try:
         rounds = client.get_rounds()
     except Exception:
         return False
 
     completed = [r for r in rounds if isinstance(r, dict) and r.get("status") == "completed"]
-    already_calibrated = set(state.get("calibrated_rounds", []))
+    already = set(state.get("calibrated_rounds", []))
 
-    # Finn nye fullførte runder
-    new_round_ids = [r["id"] for r in completed if r["id"] not in already_calibrated]
-
-    if not new_round_ids:
+    new_ids = [r["id"] for r in completed if r["id"] not in already]
+    if not new_ids:
         return False
 
-    logger.info(f"Fant {len(new_round_ids)} nye fullførte runder å kalibrere fra")
+    logger.info(f"Rekalibrerer fra {len(new_ids)} nye runder...")
 
-    # Hent ground truth for nye runder
     new_entries = []
-    for rid in new_round_ids:
+    for rid in new_ids:
         try:
-            round_data = client.get_round(rid)
-            seeds = round_data.get("seeds", round_data.get("initial_states", []))
-            rnum = round_data.get("round_number", "?")
+            rd = client.get_round(rid)
+            seeds = rd.get("seeds", rd.get("initial_states", []))
+            rnum = rd.get("round_number", "?")
 
-            for seed_idx in range(len(seeds)):
+            for si in range(len(seeds)):
                 try:
-                    analysis = client.get(f"/analysis/{rid}/{seed_idx}")
+                    analysis = client.get(f"/analysis/{rid}/{si}")
                     gt = analysis.get("ground_truth")
-                    score = analysis.get("score", "?")
-
                     if gt:
                         new_entries.append({
-                            "initial_grid": seeds[seed_idx].get("grid", []),
-                            "settlements": seeds[seed_idx].get("settlements", []),
+                            "initial_grid": seeds[si].get("grid", []),
+                            "settlements": seeds[si].get("settlements", []),
                             "ground_truth": gt,
                         })
-                        logger.info(f"  Runde {rnum} seed {seed_idx}: score={score}")
                 except Exception:
                     pass
                 time.sleep(0.3)
-
-            already_calibrated.add(rid)
-        except Exception as e:
-            logger.warning(f"  Kunne ikke hente runde {rid[:12]}: {e}")
+            already.add(rid)
+        except Exception:
+            pass
 
     if not new_entries:
-        state["calibrated_rounds"] = list(already_calibrated)
+        state["calibrated_rounds"] = list(already)
         return False
 
-    # Last eksisterende kalibrering og legg til nye data
+    # Oppdater calibration_data.json
     existing = {}
     if CALIBRATION_FILE.exists():
-        existing = json.loads(CALIBRATION_FILE.read_text())
+        try:
+            existing = json.loads(CALIBRATION_FILE.read_text())
+        except Exception:
+            pass
 
-    # Beregn nye tabeller fra ALLE data (gammel + ny)
-    # Vi rebuilder fra scratch ved å akkumulere counts
     transition_counts = defaultdict(lambda: np.zeros(NUM_CLASSES, dtype=float))
     simple_counts = defaultdict(lambda: np.zeros(NUM_CLASSES, dtype=float))
 
-    # Hent counts fra eksisterende tabell (approximate fra distribusjon × sample_count)
     old_table = existing.get("transition_table", {})
     for key, data in old_table.items():
         dist = np.array(data["distribution"], dtype=float)
@@ -171,17 +394,14 @@ def recalibrate(client, state):
         transition_counts[key] += dist * n
 
     old_simple = existing.get("simple_prior", {})
-    old_num_seeds = existing.get("num_seeds", 0)
+    old_seeds = existing.get("num_seeds", 0)
     for key, dist in old_simple.items():
-        # Estimér counts fra antall seeds × 1600 celler / antall terrengtyper
-        simple_counts[key] += np.array(dist, dtype=float) * old_num_seeds * 200
+        simple_counts[key] += np.array(dist, dtype=float) * old_seeds * 200
 
-    # Legg til nye data
     for entry in new_entries:
         grid = entry["initial_grid"]
         gt = entry["ground_truth"]
         settlements = entry["settlements"]
-
         if not grid or not gt:
             continue
 
@@ -199,10 +419,7 @@ def recalibrate(client, state):
                 else:
                     continue
 
-                # Simple prior
                 simple_counts[str(terrain)] += gt_probs
-
-                # Avstandsbasert (skip statiske)
                 if terrain in (10, 5):
                     continue
 
@@ -212,40 +429,29 @@ def recalibrate(client, state):
                 key = f"{terrain}_{band}_{int(coastal)}"
                 transition_counts[key] += gt_probs
 
-    # Normaliser
-    new_transition_table = {}
+    new_table = {}
     for key, counts in transition_counts.items():
         total = counts.sum()
         if total > 0:
-            new_transition_table[key] = {
-                "distribution": (counts / total).tolist(),
-                "sample_count": int(total),
-            }
+            new_table[key] = {"distribution": (counts / total).tolist(), "sample_count": int(total)}
 
-    new_simple_prior = {}
+    new_simple = {}
     for key, counts in simple_counts.items():
         total = counts.sum()
         if total > 0:
-            new_simple_prior[key] = (counts / total).tolist()
-
-    # Lagre oppdatert kalibrering
-    total_rounds = len(already_calibrated)
-    total_seeds = existing.get("num_seeds", 0) + len(new_entries)
+            new_simple[key] = (counts / total).tolist()
 
     output = {
-        "transition_table": new_transition_table,
-        "simple_prior": new_simple_prior,
-        "num_rounds": total_rounds,
-        "num_seeds": total_seeds,
+        "transition_table": new_table,
+        "simple_prior": new_simple,
+        "num_rounds": len(already),
+        "num_seeds": existing.get("num_seeds", 0) + len(new_entries),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-
     CALIBRATION_FILE.write_text(json.dumps(output, indent=2))
-    state["calibrated_rounds"] = list(already_calibrated)
+    state["calibrated_rounds"] = list(already)
 
-    logger.info(f"Kalibrering oppdatert: {total_rounds} runder, {total_seeds} seeds, "
-                f"{len(new_transition_table)} nøkler")
-
+    logger.info(f"Kalibrering oppdatert: {len(already)} runder, {len(new_table)} nøkler")
     return True
 
 
@@ -257,52 +463,44 @@ def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
     state = load_state()
     rounds_solved = 0
 
-    logger.info("=== Ola's Nightbot startet ===")
+    logger.info("=" * 60)
+    logger.info("  OLA'S NIGHTBOT v2 STARTET")
+    logger.info("=" * 60)
     logger.info(f"Poll: {poll_interval}s | Dry-run: {dry_run}")
     logger.info(f"Tidligere løst: {len(state['solved_rounds'])} runder")
-    logger.info(f"Kalibrering: {len(transition_table or {})} nøkler fra "
-                f"{len(state.get('calibrated_rounds', []))} runder")
+    logger.info(f"Kalibrering: {len(transition_table or {})} nøkler")
 
     while True:
         try:
-            # === 1. Rekalibrering fra nye fullførte runder ===
+            # Rekalibrér fra nye fullførte runder
             try:
-                recalibrated = recalibrate(client, state)
-                if recalibrated:
-                    # Last inn oppdatert kalibrering
+                if recalibrate(client, state):
                     transition_table, simple_prior = load_calibration()
-                    logger.info("Solver bruker nå oppdaterte priors!")
+                    logger.info("Solver bruker oppdaterte priors!")
                 save_state(state)
             except Exception as e:
                 logger.warning(f"Rekalibrering feilet: {e}")
 
-            # === 2. Sjekk budget ===
-            try:
-                budget = client.get_budget()
-                budget_used = budget.get("queries_used", 0)
-                budget_max = budget.get("queries_max", 50)
-                logger.info(f"Budget: {budget_used}/{budget_max}")
-            except Exception:
-                budget_used = 0
-
-            # === 3. Finn og løs ny runde ===
+            # Finn ny runde
             round_id, round_data = find_new_round(client, state["solved_rounds"])
 
             if round_id:
                 rnum = round_data.get("round_number", "?")
-                closes = round_data.get("closes_at", "?")
                 weight = round_data.get("round_weight", "?")
-                logger.info(f"=== Runde {rnum} (vekt {weight}) ===")
-                logger.info(f"Stenger: {closes}")
+                closes = round_data.get("closes_at", "?")
+                logger.info(f"\n{'='*60}")
+                logger.info(f"  RUNDE {rnum} (vekt {weight})")
+                logger.info(f"  Stenger: {closes}")
+                logger.info(f"{'='*60}")
 
-                # Advarsel hvis budget allerede brukt
+                # Budget-sjekk
                 try:
                     budget = client.get_budget()
-                    budget_used = budget.get("queries_used", 0)
-                    if budget_used > 0:
-                        logger.warning(f"Budget {budget_used}/50 allerede brukt!")
-                        if budget_used >= 50:
-                            logger.error("Budget oppbrukt! Noen andre kjører. Skipper.")
+                    used = budget.get("queries_used", 0)
+                    if used > 0:
+                        logger.warning(f"Budget {used}/50 allerede brukt!")
+                        if used >= 50:
+                            logger.error("Budget oppbrukt! Skipper runden.")
                             state["solved_rounds"].append(round_id)
                             save_state(state)
                             time.sleep(poll_interval)
@@ -311,44 +509,53 @@ def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
                     pass
 
                 try:
-                    results = solve_round(
-                        client, round_id, round_data,
-                        transition_table, simple_prior,
-                        queries_per_seed=10,
-                        submit=not dry_run,
-                    )
+                    if dry_run:
+                        logger.info("[DRY RUN] Skipper solve")
+                        results = []
+                    else:
+                        results = solve_round_two_pass(
+                            client, round_id, round_data,
+                            transition_table, simple_prior,
+                        )
 
                     state["solved_rounds"].append(round_id)
 
                     # Logg scores
-                    scores = []
-                    for r in results:
-                        score = r.get("score")
-                        if isinstance(score, (int, float)):
-                            scores.append(score)
+                    scores = [r["score"] for r in results
+                              if isinstance(r.get("score"), (int, float))]
+                    prior_scores = [r["prior_score"] for r in results
+                                    if isinstance(r.get("prior_score"), (int, float))]
 
                     if scores:
                         avg = sum(scores) / len(scores)
+                        weighted = avg * weight if isinstance(weight, (int, float)) else "?"
                         state["scores"][round_id] = {
                             "round_number": rnum,
                             "avg_score": avg,
+                            "weighted": weighted,
                             "per_seed": [r.get("score", "?") for r in results],
+                            "prior_avg": sum(prior_scores) / len(prior_scores) if prior_scores else "?",
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
-                        logger.info(f"*** Runde {rnum} ferdig! Snitt: {avg:.1f} ***")
+                        logger.info(f"\n  ★ Runde {rnum}: snitt={avg:.1f}, weighted={weighted}")
 
-                        # Vis trend
-                        all_scores = [v["avg_score"] for v in state["scores"].values()
-                                      if isinstance(v.get("avg_score"), (int, float))]
-                        if len(all_scores) >= 2:
-                            last3 = all_scores[-3:]
-                            trend = "↑" if last3[-1] > last3[0] else "↓"
-                            logger.info(f"Trend: {' → '.join(f'{s:.1f}' for s in last3)} {trend}")
-                    else:
-                        logger.info(f"Runde {rnum} løst (score kommer etter runden)")
+                        if prior_scores:
+                            prior_avg = sum(prior_scores) / len(prior_scores)
+                            logger.info(f"  Prior-only: {prior_avg:.1f} → Obs: {avg:.1f} "
+                                        f"({avg - prior_avg:+.1f})")
+
+                        # Trend
+                        all_avgs = [v["avg_score"] for v in state["scores"].values()
+                                    if isinstance(v.get("avg_score"), (int, float))]
+                        if len(all_avgs) >= 2:
+                            last = all_avgs[-3:]
+                            trend = " → ".join(f"{s:.0f}" for s in last)
+                            arrow = "↑" if last[-1] > last[0] else "↓"
+                            logger.info(f"  Trend: {trend} {arrow}")
 
                     save_state(state)
                     rounds_solved += 1
+                    state["total_rounds_solved"] = state.get("total_rounds_solved", 0) + 1
 
                     if max_rounds > 0 and rounds_solved >= max_rounds:
                         logger.info(f"Nådd maks ({max_rounds} runder). Stopper.")
@@ -357,6 +564,7 @@ def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
                 except Exception as e:
                     logger.error(f"Feil i runde {rnum}: {e}")
                     logger.error(traceback.format_exc())
+                    # Ikke legg til i solved_rounds → prøver igjen neste poll
 
             else:
                 logger.info(f"Ingen nye runder. Venter {poll_interval}s...")
@@ -364,7 +572,7 @@ def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
             time.sleep(poll_interval)
 
         except KeyboardInterrupt:
-            logger.info("=== Stoppet av bruker ===")
+            logger.info("Stoppet av bruker.")
             save_state(state)
             break
         except Exception as e:
@@ -376,12 +584,10 @@ def run_bot(poll_interval=120, dry_run=False, max_rounds=0):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Ola's Astar Island Nightbot")
-    parser.add_argument("--poll-interval", type=int, default=120,
-                        help="Sekunder mellom sjekker (default: 120)")
+    parser = argparse.ArgumentParser(description="Ola's Astar Island Nightbot v2")
+    parser.add_argument("--poll-interval", type=int, default=120)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--max-rounds", type=int, default=0,
-                        help="Stopp etter N runder (0=uendelig)")
+    parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
