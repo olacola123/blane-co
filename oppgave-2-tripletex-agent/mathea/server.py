@@ -559,33 +559,40 @@ def format_context(ctx: dict) -> str:
 
     if ctx.get("departments"):
         used_nums = [d.get("departmentNumber", 0) for d in ctx["departments"]]
-        lines.append(f"EXISTING DEPARTMENTS: {[f\"{d['name']}(id={d['id']},num={d.get('departmentNumber','?')})\" for d in ctx['departments']]}")
-        lines.append(f"  → Next dept numbers: {max(used_nums)+1}, {max(used_nums)+2}, {max(used_nums)+3}")
+        dept_list = ["{name}(id={id},num={num})".format(name=d["name"], id=d["id"], num=d.get("departmentNumber", "?")) for d in ctx["departments"]]
+        lines.append("EXISTING DEPARTMENTS: " + str(dept_list))
+        lines.append("  → Next dept numbers: {}, {}, {}".format(max(used_nums)+1, max(used_nums)+2, max(used_nums)+3))
     else:
         lines.append("EXISTING DEPARTMENTS: none — use departmentNumber=1,2,3 for new ones")
 
     if ctx.get("divisions"):
-        lines.append(f"DIVISIONS: {[f\"{d['name']}(id={d['id']})\" for d in ctx['divisions']]}")
+        div_list = ["{name}(id={id})".format(name=d["name"], id=d["id"]) for d in ctx["divisions"]]
+        lines.append("DIVISIONS: " + str(div_list))
     else:
         lines.append("DIVISIONS: none (create one if needed for employment)")
 
     if ctx.get("activities"):
-        lines.append(f"ACTIVITIES: {[f\"{a['name']}(id={a['id']})\" for a in ctx['activities'][:5]]}")
+        act_list = ["{name}(id={id})".format(name=a["name"], id=a["id"]) for a in ctx["activities"][:5]]
+        lines.append("ACTIVITIES: " + str(act_list))
 
     if ctx.get("payment_types"):
-        lines.append(f"INVOICE PAYMENT TYPES: {[f\"{p.get('description','?')}(id={p['id']})\" for p in ctx['payment_types']]}")
+        pt_list = ["{desc}(id={id})".format(desc=p.get("description", "?"), id=p["id"]) for p in ctx["payment_types"]]
+        lines.append("INVOICE PAYMENT TYPES: " + str(pt_list))
 
     if ctx.get("products"):
-        lines.append(f"EXISTING PRODUCTS: {[f\"{p['name']}(id={p['id']},num={p.get('number','?')})\" for p in ctx['products'][:5]]}")
+        prod_list = ["{name}(id={id},num={num})".format(name=p["name"], id=p["id"], num=p.get("number", "?")) for p in ctx["products"][:5]]
+        lines.append("EXISTING PRODUCTS: " + str(prod_list))
 
     if ctx.get("customers"):
-        lines.append(f"EXISTING CUSTOMERS: {[f\"{c['name']}(id={c['id']})\" for c in ctx['customers'][:5]]}")
+        cust_list = ["{name}(id={id})".format(name=c["name"], id=c["id"]) for c in ctx["customers"][:5]]
+        lines.append("EXISTING CUSTOMERS: " + str(cust_list))
 
     if ctx.get("suppliers"):
-        lines.append(f"EXISTING SUPPLIERS: {[f\"{s['name']}(id={s['id']})\" for s in ctx['suppliers'][:5]]}")
+        supp_list = ["{name}(id={id})".format(name=s["name"], id=s["id"]) for s in ctx["suppliers"][:5]]
+        lines.append("EXISTING SUPPLIERS: " + str(supp_list))
 
     if ctx.get("ledger_accounts"):
-        lines.append(f"LEDGER ACCOUNT IDs (use directly — do NOT GET /ledger/account again):")
+        lines.append("LEDGER ACCOUNT IDs (use directly — do NOT GET /ledger/account again):")
         acct_names = {
             "1500": "Kundefordringer", "1920": "Bankinnskudd", "2400": "Leverandørgjeld",
             "2710": "Inng.MVA 25%", "2780": "Skyldig lønn", "3000": "Salgsinntekt",
@@ -595,19 +602,22 @@ def format_context(ctx: dict) -> str:
             "7700": "Annen drift", "8700": "Skatt",
         }
         for num, acc_id in sorted(ctx["ledger_accounts"].items()):
-            lines.append(f"  {num} ({acct_names.get(num, '?')}): id={acc_id}")
+            lines.append("  {} ({}): id={}".format(num, acct_names.get(num, "?"), acc_id))
 
     if ctx.get("salary_types"):
-        lines.append(f"SALARY TYPES: {ctx['salary_types']}")
+        lines.append("SALARY TYPES: " + str(ctx["salary_types"]))
 
     if ctx.get("per_diem_overnight_id") or ctx.get("per_diem_day_id"):
-        lines.append(f"PER DIEM: overnight_id={ctx.get('per_diem_overnight_id','?')}  day_id={ctx.get('per_diem_day_id','?')}")
+        lines.append("PER DIEM: overnight_id={}  day_id={}".format(
+            ctx.get("per_diem_overnight_id", "?"), ctx.get("per_diem_day_id", "?")))
 
     if ctx.get("cost_categories"):
-        lines.append(f"TRAVEL COST CATEGORIES: {[f\"{c.get('description','?')}(id={c['id']})\" for c in ctx['cost_categories'][:5]]}")
+        cc_list = ["{desc}(id={id})".format(desc=c.get("description", "?"), id=c["id"]) for c in ctx["cost_categories"][:5]]
+        lines.append("TRAVEL COST CATEGORIES: " + str(cc_list))
 
     if ctx.get("travel_pay_types"):
-        lines.append(f"TRAVEL PAYMENT TYPES: {[f\"{p.get('description','?')}(id={p['id']})\" for p in ctx['travel_pay_types']]}")
+        tpt_list = ["{desc}(id={id})".format(desc=p.get("description", "?"), id=p["id"]) for p in ctx["travel_pay_types"]]
+        lines.append("TRAVEL PAYMENT TYPES: " + str(tpt_list))
 
     return "\n".join(lines)
 
