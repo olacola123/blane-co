@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tripletex Task Dashboard — Blåne&co</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0e1a; color: #e0e6f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 20px; }
+  h1 { text-align: center; font-size: 28px; margin-bottom: 5px; }
+  .subtitle { text-align: center; color: #7a8ba8; margin-bottom: 20px; font-size: 14px; }
+  .total-score { text-align: center; font-size: 48px; font-weight: 800; color: #4ade80; margin-bottom: 5px; }
+  .total-sub { text-align: center; color: #7a8ba8; margin-bottom: 30px; }
+
+  .section-title { font-size: 18px; font-weight: 700; margin: 25px 0 12px; padding-left: 5px; border-left: 3px solid #4ade80; padding-left: 10px; }
+  .section-title.t3 { border-left-color: #a78bfa; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-bottom: 20px; }
+
+  .card { background: #141b2d; border: 1px solid #1e2a42; border-radius: 10px; padding: 14px; position: relative; transition: transform 0.15s; }
+  .card:hover { transform: translateY(-2px); }
+  .card.perfect { border-color: #4ade80; box-shadow: 0 0 12px rgba(74,222,128,0.15); }
+  .card.partial { border-color: #fbbf24; box-shadow: 0 0 12px rgba(251,191,36,0.1); }
+  .card.broken { border-color: #f87171; box-shadow: 0 0 12px rgba(248,113,113,0.15); }
+  .card.unknown { border-color: #475569; opacity: 0.6; }
+  .card.t3 { border-color: #a78bfa; }
+  .card.t3.perfect { border-color: #a78bfa; box-shadow: 0 0 15px rgba(167,139,250,0.2); }
+
+  .task-num { font-size: 11px; color: #7a8ba8; font-weight: 600; }
+  .task-type { font-size: 13px; font-weight: 600; margin: 4px 0; min-height: 32px; }
+  .task-score { font-size: 28px; font-weight: 800; margin: 6px 0; }
+  .task-score.green { color: #4ade80; }
+  .task-score.yellow { color: #fbbf24; }
+  .task-score.red { color: #f87171; }
+  .task-score.purple { color: #a78bfa; }
+  .task-score.gray { color: #475569; }
+
+  .task-meta { font-size: 11px; color: #7a8ba8; }
+  .task-checks { font-size: 11px; margin-top: 4px; }
+  .task-checks .pass { color: #4ade80; }
+  .task-checks .fail { color: #f87171; }
+
+  .competitors { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .comp { font-size: 10px; background: #1e2a42; padding: 2px 6px; border-radius: 4px; }
+  .comp.best { background: #166534; color: #4ade80; }
+
+  .fix-badge { position: absolute; top: 8px; right: 8px; font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
+  .fix-badge.v14 { background: #166534; color: #4ade80; }
+  .fix-badge.todo { background: #92400e; color: #fbbf24; }
+  .fix-badge.new { background: #5b21b6; color: #a78bfa; }
+
+  .legend { display: flex; gap: 15px; justify-content: center; margin: 20px 0; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+  .stats-row { display: flex; gap: 15px; justify-content: center; margin: 15px 0; flex-wrap: wrap; }
+  .stat { background: #141b2d; border: 1px solid #1e2a42; border-radius: 8px; padding: 12px 20px; text-align: center; min-width: 120px; }
+  .stat-value { font-size: 24px; font-weight: 800; }
+  .stat-label { font-size: 11px; color: #7a8ba8; }
+
+  .problem-section { background: #141b2d; border: 1px solid #1e2a42; border-radius: 10px; padding: 16px; margin: 15px 0; }
+  .problem-title { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+  .problem-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #1e2a42; font-size: 13px; }
+  .problem-row:last-child { border: none; }
+  .gain { color: #4ade80; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<h1>Tripletex Dashboard</h1>
+<p class="subtitle">Blåne&co — v14 deployed — T3 aktiv</p>
+
+<div class="total-score">40.58</div>
+<p class="total-sub">23/30 tasks attempted — v14.4 deployed — T3=4.2</p>
+
+<div class="stats-row">
+  <div class="stat"><div class="stat-value" style="color:#4ade80">4</div><div class="stat-label">PERFEKT (4.00)</div></div>
+  <div class="stat"><div class="stat-value" style="color:#fbbf24">13</div><div class="stat-label">PARTIAL</div></div>
+  <div class="stat"><div class="stat-value" style="color:#f87171">6</div><div class="stat-label">ZERO</div></div>
+  <div class="stat"><div class="stat-value" style="color:#a78bfa">5/12</div><div class="stat-label">T3 TRUFFET</div></div>
+  <div class="stat"><div class="stat-value" style="color:#60a5fa">~30</div><div class="stat-label">POENG IGJEN</div></div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#4ade80"></div> Perfekt</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#fbbf24"></div> Partial</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f87171"></div> Zero / Broken</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> T3 (ny)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#475569"></div> Ikke truffet</div>
+</div>
+
+<div class="section-title">Tasks 01-18 (Tier 2, ×2 multiplier, max 4.00)</div>
+<div class="grid">
+
+  <div class="card partial">
+    <span class="fix-badge v14">v14 FIX</span>
+    <div class="task-num">TASK 01</div>
+    <div class="task-type">Customer m/adresse</div>
+    <div class="task-score yellow">1.50</div>
+    <div class="task-meta">~15 tries</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.50</span>
+      <span class="comp">sf 1.50</span>
+      <span class="comp best">ACR 2.00</span>
+    </div>
+  </div>
+
+  <div class="card perfect">
+    <div class="task-num">TASK 02</div>
+    <div class="task-type">Product</div>
+    <div class="task-score green">2.00</div>
+    <div class="task-meta">14 tries</div>
+    <div class="competitors">
+      <span class="comp">Alle 2.00</span>
+    </div>
+  </div>
+
+  <div class="card perfect">
+    <div class="task-num">TASK 03</div>
+    <div class="task-type">Invoice (send)</div>
+    <div class="task-score green">2.00</div>
+    <div class="task-meta">14 tries</div>
+    <div class="competitors">
+      <span class="comp">Alle 2.00</span>
+    </div>
+  </div>
+
+  <div class="card perfect">
+    <div class="task-num">TASK 04</div>
+    <div class="task-type">Departments (3)</div>
+    <div class="task-score green">2.00</div>
+    <div class="task-meta">15 tries</div>
+    <div class="competitors">
+      <span class="comp">Alle 2.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <span class="fix-badge v14">v14 FIX</span>
+    <div class="task-num">TASK 05</div>
+    <div class="task-type">Employee m/start</div>
+    <div class="task-score yellow">1.33</div>
+    <div class="task-meta">13 tries • 5-6/8 checks</div>
+    <div class="task-checks"><span class="pass">firstName lastName email dob startDate</span> <span class="fail">empType? empForm? pct?</span></div>
+    <div class="competitors">
+      <span class="comp best">Ninjas 2.00</span>
+      <span class="comp">sf 1.33</span>
+      <span class="comp best">ACR 2.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <span class="fix-badge v14">v14 FIX</span>
+    <div class="task-num">TASK 06</div>
+    <div class="task-type">Supplier</div>
+    <div class="task-score yellow">1.20</div>
+    <div class="task-meta">14 tries • 6/7 checks • ALLE SLITER</div>
+    <div class="task-checks"><span class="pass">name orgNr email phone isSupplier isCustomer</span> <span class="fail">language?</span></div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.27</span>
+      <span class="comp">sf 1.25</span>
+      <span class="comp">ACR 1.25</span>
+    </div>
+  </div>
+
+  <div class="card perfect">
+    <div class="task-num">TASK 07</div>
+    <div class="task-type">Customer enkel</div>
+    <div class="task-score green">2.00</div>
+    <div class="task-meta">14 tries</div>
+    <div class="competitors">
+      <span class="comp">Alle 2.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 08</div>
+    <div class="task-type">Order m/produkter</div>
+    <div class="task-score yellow">1.20</div>
+    <div class="task-meta">14 tries • BARE VI SLITER</div>
+    <div class="competitors">
+      <span class="comp best">Ninjas 2.00</span>
+      <span class="comp best">sf 2.00</span>
+      <span class="comp best">ACR 2.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 09</div>
+    <div class="task-type">Invoice multiline</div>
+    <div class="task-score yellow">2.33</div>
+    <div class="task-meta">10 tries</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 2.53</span>
+      <span class="comp">sf 2.67</span>
+      <span class="comp best">ACR 4.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 10</div>
+    <div class="task-type">Project fixed price</div>
+    <div class="task-score yellow">2.40</div>
+    <div class="task-meta">11 tries • PUT /project BETA</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 2.67</span>
+      <span class="comp">sf 2.67</span>
+      <span class="comp best">ACR 4.00</span>
+    </div>
+  </div>
+
+  <div class="card broken">
+    <span class="fix-badge v14">v14 FIX</span>
+    <div class="task-num">TASK 11</div>
+    <div class="task-type">SALARY / PAYROLL</div>
+    <div class="task-score red">0</div>
+    <div class="task-meta">10 tries • salary-modul disabled</div>
+    <div class="task-checks"><span class="fail">Voucher 5000→2780 (v14). Salary/transaction 403.</span></div>
+    <div class="competitors">
+      <span class="comp">Ninjas 0</span>
+      <span class="comp best">sf 1.50</span>
+      <span class="comp">ACR 1.00</span>
+    </div>
+  </div>
+
+  <div class="card broken">
+    <span class="fix-badge v14">v14 FIX</span>
+    <div class="task-num">TASK 12</div>
+    <div class="task-type">SUPPLIER INVOICE</div>
+    <div class="task-score red">0</div>
+    <div class="task-meta">10 tries • /incomingInvoice BETA</div>
+    <div class="task-checks"><span class="fail">Voucher: expense→2710→2400+supplier ref</span></div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.00</span>
+      <span class="comp">sf 1.00</span>
+      <span class="comp best">ACR 4.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 13</div>
+    <div class="task-type">Project enkel</div>
+    <div class="task-score yellow">2.40</div>
+    <div class="task-meta">9 tries</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.13</span>
+      <span class="comp">sf 1.38</span>
+      <span class="comp best">ACR 2.40</span>
+    </div>
+  </div>
+
+  <div class="card perfect">
+    <div class="task-num">TASK 14</div>
+    <div class="task-type">Accounting dimensions</div>
+    <div class="task-score green">4.00</div>
+    <div class="task-meta">10 tries • 13/13 checks</div>
+    <div class="competitors">
+      <span class="comp">Alle 4.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 15</div>
+    <div class="task-type">Timesheet + faktura</div>
+    <div class="task-score yellow">2.44</div>
+    <div class="task-meta">11 tries</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 2.80</span>
+      <span class="comp">sf 3.00</span>
+      <span class="comp best">ACR 3.33</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 16</div>
+    <div class="task-type">Reverse payment</div>
+    <div class="task-score yellow">2.40</div>
+    <div class="task-meta">10 tries</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 2.53</span>
+      <span class="comp best">sf 3.00</span>
+      <span class="comp best">ACR 3.00</span>
+    </div>
+  </div>
+
+  <div class="card partial">
+    <div class="task-num">TASK 17</div>
+    <div class="task-type">Travel expense</div>
+    <div class="task-score yellow">3.20</div>
+    <div class="task-meta">10 tries</div>
+    <div class="competitors">
+      <span class="comp best">Alle andre 3.50</span>
+    </div>
+  </div>
+
+  <div class="card perfect">
+    <div class="task-num">TASK 18</div>
+    <div class="task-type">Payment (registrer)</div>
+    <div class="task-score green">4.00</div>
+    <div class="task-meta">10 tries</div>
+    <div class="competitors">
+      <span class="comp">Alle 4.00</span>
+    </div>
+  </div>
+
+</div>
+
+<div class="section-title t3">Tasks 19-30 (Tier 3, ×3 multiplier, max 6.00) — IKKE TRUFFET ENNÅ</div>
+<div class="grid">
+
+  <div class="card t3 partial">
+    <span class="fix-badge todo">PDF</span>
+    <div class="task-num">TASK 19</div>
+    <div class="task-type">Employee fra PDF-kontrakt</div>
+    <div class="task-score purple">1.77</div>
+    <div class="task-meta">1 try • 13/22 checks • 5/15 failed</div>
+    <div class="task-checks"><span class="fail">Mangler: employeeNumber, department, salary, pct%, occupationCode</span></div>
+    <div class="competitors">
+      <span class="comp">Ninjas 0</span>
+    </div>
+  </div>
+
+  <div class="card t3 partial">
+    <div class="task-num">TASK 20</div>
+    <div class="task-type">Analyse + prosjekter</div>
+    <div class="task-score purple">0.60</div>
+    <div class="task-meta">1 try • Analyse regnskap → opprett prosjekter</div>
+  </div>
+
+  <div class="card t3 unknown">
+    <div class="task-num">TASK 21</div>
+    <div class="task-type">Oppdater ansatt?</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ikke truffet</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.93</span>
+      <span class="comp best">sf 2.14</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <span class="fix-badge new">v14 FIX</span>
+    <div class="task-num">TASK 22</div>
+    <div class="task-type">Kontaktperson?</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ikke truffet • INGEN har løst!</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 0</span>
+      <span class="comp">sf 0</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <span class="fix-badge new">v14 FIX</span>
+    <div class="task-num">TASK 23</div>
+    <div class="task-type">Standalone voucher?</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ikke truffet</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 0.60</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <div class="task-num">TASK 24</div>
+    <div class="task-type">Oppdater kunde?</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ikke truffet</div>
+    <div class="competitors">
+      <span class="comp best">påske 2.25</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown" style="border-color:#4ade80">
+    <span class="fix-badge" style="background:#065f46;color:#4ade80">GRATIS!</span>
+    <div class="task-num">TASK 25</div>
+    <div class="task-type">Credit note? LETT!</div>
+    <div class="task-score purple">—</div>
+    <div class="task-meta">Ikke truffet • +6.00 GRATIS</div>
+    <div class="competitors">
+      <span class="comp best">Ninjas 6.00!</span>
+      <span class="comp">sf 4.20</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <div class="task-num">TASK 26</div>
+    <div class="task-type">Ansatt admin?</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ikke truffet</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 0.60</span>
+      <span class="comp best">sf 2.10</span>
+      <span class="comp">påske 0.60</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <div class="task-num">TASK 27</div>
+    <div class="task-type">Product spesial-MVA?</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ikke truffet</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.50</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <div class="task-num">TASK 28</div>
+    <div class="task-type">Supplier invoice PDF?</div>
+    <div class="task-score gray">0</div>
+    <div class="task-meta">1 try • 2/10 checks • PDF-lesing feilet</div>
+    <div class="competitors">
+      <span class="comp">Ninjas 1.50</span>
+    </div>
+  </div>
+
+  <div class="card t3 unknown">
+    <div class="task-num">TASK 29</div>
+    <div class="task-type">???</div>
+    <div class="task-score gray">—</div>
+    <div class="task-meta">Ingen har truffet</div>
+  </div>
+
+  <div class="card t3 partial">
+    <div class="task-num">TASK 30</div>
+    <div class="task-type">Årsoppgjør/avskrivning</div>
+    <div class="task-score purple">1.80</div>
+    <div class="task-meta">1 try • 6/10 checks • Voucher avskrivning</div>
+  </div>
+
+</div>
+
+<div class="problem-section">
+  <div class="problem-title">Potensiell poenggevinst med v14</div>
+  <div class="problem-row"><span>Task 25 (T3 lett — credit note?)</span><span class="gain">+6.00</span></div>
+  <div class="problem-row"><span>Task 12 (supplier invoice voucher)</span><span class="gain">+4.00</span></div>
+  <div class="problem-row"><span>Task 19 (delete travel — state fix)</span><span class="gain">+3.00</span></div>
+  <div class="problem-row"><span>Task 22 (contact person fix)</span><span class="gain">+2.00</span></div>
+  <div class="problem-row"><span>Task 21 (update employee)</span><span class="gain">+2.00</span></div>
+  <div class="problem-row"><span>Task 11 (salary 5000→2780)</span><span class="gain">+1.50</span></div>
+  <div class="problem-row"><span>Task 06 (supplier language)</span><span class="gain">+0.80</span></div>
+  <div class="problem-row"><span>Task 05 (employee pct fix)</span><span class="gain">+0.67</span></div>
+  <div class="problem-row"><span>Task 08 (order pris-fix)</span><span class="gain">+0.80</span></div>
+  <div class="problem-row"><span>Andre T3 tasks (23,26,27,28)</span><span class="gain">+5.00</span></div>
+  <div class="problem-row" style="border-top:2px solid #4ade80;font-size:16px;font-weight:700"><span>TOTALT POTENSIAL</span><span class="gain">+25-30</span></div>
+</div>
+
+<p style="text-align:center;color:#475569;margin-top:20px;font-size:11px">Oppdater scores etter submissions • v14 deployed 21. mars</p>
+
+</body>
+</html>
