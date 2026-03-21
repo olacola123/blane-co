@@ -143,6 +143,8 @@ TASK_CONFIG = {
     "supplier":           (6,  "Tier 1 — POST /customer with isSupplier:true"),
     "product":            (5,  "Tier 1 — POST /product"),
     "department":         (6,  "Tier 1 — POST /department × N"),
+    "bank_reconciliation":(12, "Tier 3 — bank reconciliation"),
+    "update_customer":    (6,  "Tier 3 — PUT existing customer"),
     "unknown":            (15, "Unknown — use full budget"),
 }
 
@@ -288,6 +290,26 @@ def detect_task_type(prompt: str) -> str:
     # Department
     if any(w in p for w in ["avdeling", "department", "departamento", "département", "abteilung"]):
         return "department"
+
+    # Bank reconciliation
+    if any(w in p for w in [
+        "bankavstemmig", "bank reconciliation", "reconcilia", "bankutskrift",
+        "bankkonto", "bank statement", "kontoavstemming",
+    ]):
+        return "bank_reconciliation"
+
+    # Update customer
+    if any(w in p for w in ["oppdater", "update", "actualizar", "mettre à jour", "aktualisieren", "endre"]):
+        if any(w in p for w in ["kunde", "customer", "cliente", "client", "klient"]):
+            return "update_customer"
+
+    # Year-end / depreciation / annual closing
+    if any(w in p for w in [
+        "årsoppgjør", "year-end", "year end", "cierre", "bilan annuel",
+        "jahresabschluss", "avskrivning", "depreciation", "avskriv",
+        "bankavstemmig", "bank reconciliation", "nedskrivning",
+    ]):
+        return "year_end"
 
     return "unknown"
 
@@ -809,6 +831,46 @@ POST /ledger/voucher:
 → Use account IDs from LEDGER ACCOUNT IDs in context — do NOT GET /ledger/account
 → If VAT involved: use vatType:{id:1} on expense side (Tripletex auto-handles 2710)
 """,
+
+    "update_customer": """
+── UPDATE CUSTOMER (T3 — 1 write call!) ──
+Find customer by name/orgNr in EXISTING CUSTOMERS — do NOT GET /customer
+GET /customer/ID?fields=* to get all current fields including version
+PUT /customer/ID with ALL fields (keep everything unchanged, update only what prompt says):
+  {id, version, name, organizationNumber, email, invoiceEmail, phoneNumber,
+   isCustomer, isSupplier, language, postalAddress:{addressLine1, postalCode, city}}
+→ Keep version from GET. NEVER omit version on PUT.
+""",
+
+    "bank_reconciliation": """
+── BANK RECONCILIATION (T3) ──
+Step 1: GET /ledger/account?number=1920&fields=id,version,bankAccountNumber (FREE)
+  → This is the bank account. Note its ID.
+Step 2: GET /bank/reconciliation/>last?accountId=ACCT_ID&fields=* (FREE)
+  → Find last reconciliation or create new period
+Step 3: POST /bank/reconciliation:
+  {account:{id:ACCT_ID}, accountingPeriod:{id:PERIOD_ID}, type:"MANUAL",
+   bankAccountClosingBalanceCurrency:CLOSING_BALANCE}
+Step 4: POST /bank/reconciliation/match (match transactions to postings)
+  Or: PUT /bank/reconciliation/match/:suggest (auto-suggest matches)
+→ If task gives bank statement file: POST /bank/statement/import first
+""",
+
+    "year_end": """
+── YEAR-END / ÅRSOPPGJØR (T3) ──
+Common operations:
+1. Depreciation (avskrivning): POST /ledger/voucher with:
+   - Debit 6000-6099 (depreciation expense)
+   - Credit 1200-1299 (accumulated depreciation on asset)
+2. Closing entries: move profit/loss to equity accounts
+3. Tax provision: POST /ledger/voucher with:
+   - Debit 8700 (skattekostnad) — account id from context
+   - Credit 2920 (betalbar skatt)
+4. Check for bank reconciliation if mentioned
+
+READ THE PROMPT CAREFULLY — year-end tasks vary widely. Use accounts from context.
+For avskrivning: amount = (cost / useful_life_years) per year, or % of book value.
+""",
 }
 
 def build_system_prompt(today: str, due: str, company_id, task_type: str) -> str:
@@ -867,16 +929,19 @@ POST /product {{name, number:"STRING", priceExcludingVatCurrency:X,
 VAT IDs: 3=25%, 31=15%, 32=12%, 5=0%(inside MVA zone), 6=0%(outside)
 
 ── INVOICE ──
-1. POST /customer (find existing first!)
-2. POST /product
-3. POST /order {{customer:{{id:X}}, deliveryDate:TODAY, orderDate:TODAY, isPrioritizeAmountsIncludingVat:false}}
-4. POST /order/orderline {{order:{{id:X}}, product:{{id:Y}}, count:1, unitPriceExcludingVatCurrency:PRICE, vatType:{{id:3}}}}
-5. POST /invoice {{invoiceDate:TODAY, invoiceDueDate:DUE, orders:[{{id:X}}]}} query_params: sendToCustomer=false
+EFFICIENT PATH (fewer calls = higher efficiency bonus!):
+1. POST /customer (skip if customer in EXISTING CUSTOMERS context!)
+2. POST /product (skip if product exists!)
+3. POST /order {{customer:{{id:X}}, orderDate:TODAY, deliveryDate:TODAY, isPrioritizeAmountsIncludingVat:false,
+     orderLines:[{{product:{{id:Y}}, count:1, unitPriceExcludingVatCurrency:PRICE, vatType:{{id:3}}}}]}}
+   ← orderLines CAN be nested in POST /order → saves 1 extra call!
+4. PUT /order/ID/:invoice query_params: invoiceDate=TODAY&sendToCustomer=false
+   ← saves 1 call vs POST /invoice!
 
-── INVOICE + PAYMENT ──
-After invoice:
-6. PUT /invoice/ID/:payment query_params: paymentDate=TODAY&paymentTypeId=ID&paidAmount=TOTAL_INCL_VAT
-   paidAmount = orderline price × 1.25 (includes VAT)
+── INVOICE + PAYMENT (combine into 1 step!) ──
+4. PUT /order/ID/:invoice query_params: invoiceDate=TODAY&sendToCustomer=false&paymentTypeId=ID&paidAmount=TOTAL_INCL_VAT
+   paidAmount = price × 1.25 (includes VAT). paymentTypeId from INVOICE PAYMENT TYPES in context.
+   ← This creates AND pays the invoice in ONE call!
 
 ── PROJECT ──
 1. PUT existing employee to EXTENDED (or POST new with userType:"EXTENDED")
