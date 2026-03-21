@@ -7,38 +7,33 @@
 | 2 | Gemini 2.5 Flash + JSON-plan | 63-100% | Nei | Fragil JSON-parsing, placeholder-system |
 | 3 | Gemini 2.5 Flash + function calling | 100% på 5+ typer | Ja | Gemini kaller API direkte, fikser feil selv |
 | 4 | Claude Sonnet 4 + tool use | ? | Ja (v5) | Byttet fra Gemini, native JSON body |
-| 5 | Claude Sonnet 4 + forbedret prompt | ? | Ja (v6) | Dynamisk dato, flere oppskrifter, bedre feilhåndtering |
+| 5 | Claude Sonnet 4 + v6-v14 | ~50 pts | Ja | Iterativ forbedring, 19 oppskrifter, interceptors |
+| 6 | Claude Sonnet 4 + v15 | ? | Ja | Full T3-støtte: year-end, bank recon, ledger audit, FX, reminder |
 
 ## Status
-- **Total Score: 8.1** | **Rank: #7 av 75** | **8/30 tasks løst** | **32 submissions**
 - Cloud Run: `https://tripletex-agent-609915262705.europe-north1.run.app`
-- LLM: Claude Sonnet 4 (byttet fra Gemini)
+- LLM: Claude Sonnet 4
+- 134 runs, 657 API-kall, 29 errors (per 21. mars 23:xx)
+- 27 av 30 oppgavetyper identifisert fra logger
 
-## v6 forbedringer (nåværende)
-1. **Dynamisk dato** — system prompt bruker `date.today()` i stedet for hardkodet dato
-2. **Separert employee-oppskrifter** — enkel ansatt vs. ansatt med startdato/employment
-3. **employmentType: "ORDINARY"** — lagt til i employment-oppskrift (kan ha manglet)
-4. **Bedre dato-parsing** — eksplisitte eksempler for alle formater med leading zeros
-5. **Eksplisitt phoneNumber** — i supplier, customer, contact, employee oppskrifter
-6. **isCustomer:false** — eksplisitt for leverandører
-7. **Nye oppskrifter** — credit note, voucher/bilag, update resource, single department
-8. **Request timeouts** — 30s per API-kall (hindrer hanging)
-9. **Økt response-truncation** — 8000 chars (opp fra 5000)
-10. **Bedre logging** — full prompt, filnavn, modellnavn
+## v15 (nåværende — deployed 21. mars ~23:xx)
+1. **5 nye T3-oppskrifter**: YEAR_END, BANK_RECON, REMINDER_FEE, LEDGER_AUDIT, FX_INVOICE
+2. **Forbedret task detection** — regex-basert, 27+ typer (opp fra 9)
+3. **Dynamisk max_tokens** — 2048 for komplekse, 1024 for enkle
+4. **Dynamisk max_iterations** — 25 for komplekse, 12 for enkle
+5. **15 nye ledger-kontoer i prefetch** — for avskrivning, årsoppgjør, valuta
 
 ## Nåværende strategi
-Claude Sonnet 4 med tool use (v6): 4 tools (get/post/put/delete), Claude ser API-svar og tilpasser seg. System prompt med:
-- Dynamisk dato
-- 18 step-by-step oppskrifter (opp fra 12)
-- Flerspråklig dato-parsing guide
-- Komplett field reference + error recovery
-- Native vision for image attachments (ingen OCR-mellomsteg)
+Claude Sonnet 4 med tool use: 4 tools (get/post/put/delete). System prompt med:
+- 24+ step-by-step oppskrifter
+- Massiv prefetch (48 parallelle kall): employees, departments, products, customers, suppliers, salary types, 30+ ledger-kontoer, rate categories, cost categories, payment types
+- Interceptors: POST /supplier → /customer, incomingInvoice → voucher, dateOfBirth fix
+- Native vision for bilder, pdfplumber for PDF
 
 ## Neste steg
-1. Deploy v6 til Cloud Run
-2. Submitte for Tier 2 (×2 multiplier)
-3. Sjekk resultater — finne nye feilmønstre i logger
-4. Vurder modellbytte (Opus?) for komplekse oppgaver
+1. Sjekk logger etter v15 — treffer vi nye T3-typer?
+2. Optimaliser efficiency (færre prefetch-kall for enkle tasks?)
+3. Test DELETE_TRAVEL, CONTACT, ADMIN_EMP oppgavene (0 treff så langt)
 
 ## Funn (viktig for alle)
 - `userType` MÅ være "STANDARD" — "ADMINISTRATOR" godtas ikke av API
@@ -53,3 +48,6 @@ Claude Sonnet 4 med tool use (v6): 4 tools (get/post/put/delete), Claude ser API
 - Claude håndterer bilder nativt via vision — trenger ikke separat OCR
 - employmentType: "ORDINARY" bør inkluderes
 - isCustomer:false MÅ settes eksplisitt for leverandører
+- T3-oppgaver er MYE mer komplekse: årsoppgjør, bankavsteming, hovedbok-audit, valutafaktura
+- /incomingInvoice og /supplierInvoice er BETA (403) — bruk voucher
+- salary-modul deaktivert — bruk voucher (5000 debit, 2780 kredit)
