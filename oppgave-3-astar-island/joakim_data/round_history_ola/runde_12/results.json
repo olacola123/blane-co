@@ -1,0 +1,52 @@
+{
+  "round_id": "795bfb1f-54bd-4f39-a526-9868b36f7ebd",
+  "round_number": 12,
+  "alpha_used": 8,
+  "prior_scores": [
+    "?",
+    "?",
+    "?",
+    "?",
+    "?"
+  ],
+  "obs_scores": [
+    "?",
+    "?",
+    "?",
+    "?",
+    "?"
+  ],
+  "results": [
+    {
+      "seed_index": 0,
+      "score": "?",
+      "prior_score": "?",
+      "method": "observed+cross-seed+smoothing"
+    },
+    {
+      "seed_index": 1,
+      "score": "?",
+      "prior_score": "?",
+      "method": "observed+cross-seed+smoothing"
+    },
+    {
+      "seed_index": 2,
+      "score": "?",
+      "prior_score": "?",
+      "method": "observed+cross-seed+smoothing"
+    },
+    {
+      "seed_index": 3,
+      "score": "?",
+      "prior_score": "?",
+      "method": "observed+cross-seed+smoothing"
+    },
+    {
+      "seed_index": 4,
+      "score": "?",
+      "prior_score": "?",
+      "method": "observed+cross-seed+smoothing"
+    }
+  ],
+  "timestamp": "2026-03-21T03:23:26.693531+00:00"
+}
