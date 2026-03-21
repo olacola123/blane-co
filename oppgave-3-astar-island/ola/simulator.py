@@ -1,243 +1,259 @@
 """
-Astar Island Forward Simulator v1
-==================================
-Empirisk simulator basert på reverse-engineered mekanikk fra 13 runder ground truth.
+Astar Island Forward Simulator v2
+====================================
+Two-layer prediction system:
 
-I stedet for å simulere 50 år med 5 faser, bruker vi EMPIRISKE
-overgangssannsynligheter kondisjonert på:
-  1. Initial terrain (land/forest/settlement/port)
-  2. Chebyshev distance til nærmeste settlement
-  3. Coastal vs inland
-  4. World vitality parameter (0.0=dead, 1.0=booming)
+LAYER 1: Empirical model (fast, prior-only)
+  - Exact lookup tables from 13 rounds of ground truth
+  - Conditioned on: initial_terrain × distance × world_type
+  - Used as prior / fallback
 
-Dette er en "learned simulator" — den reproduserer ground truth-mønstrene
-uten å simulere de underliggende mekanikkene.
+LAYER 2: Monte Carlo simulator (slow, observation-aware)
+  - Cellular automaton running 50 years × 5 phases
+  - Hidden parameters inferred from observations
+  - Run N times → probability distribution
 
-Bruk:
-    from simulator import predict_distribution
-    pred = predict_distribution(grid, settlements, vitality=0.5)
-    # pred shape: (40, 40, 6) — probability distribution per cell
+Ground truth analysis (13 rounds × seed 0):
+  - Dead worlds (R3,R8,R10): settlement survival < 8%
+  - Stable worlds (R4,R9,R13): survival 20-30%
+  - Boom worlds (R1,R2,R5,R6,R7,R11,R12): survival 36-58%
+  - Ocean/mountain: 100% static
+  - Seeds have DIFFERENT grids within a round (~700 cell diffs)
+  - Ports appear inland too (avg 1.5% in alive worlds)
 """
 
 from __future__ import annotations
+
+import math
+import random
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
-from typing import List, Dict
 
 MAP_W, MAP_H = 40, 40
-NUM_CLASSES = 6  # empty, settlement, port, ruin, forest, mountain
+NUM_CLASSES = 6  # [empty, settlement, ruin, port, forest, mountain]
 
-# === EMPIRISKE OVERGANGSTABELLER ===
-# Fra analyse av 13 runder × 5 seeds ground truth
-# Format: [empty, settlement, port, ruin, forest, mountain]
+# Terrain codes (from API)
+OCEAN = 10
+PLAINS = 11
+EMPTY_T = 0
+SETTLEMENT_T = 1
+PORT_T = 2       # terrain code 2 = Port = class 2
+RUIN_T = 3       # terrain code 3 = Ruin = class 3
+FOREST_T = 4
+MOUNTAIN_T = 5
 
-# Land (terrain=11) ved ulike avstander, ALIVE worlds
-LAND_ALIVE = {
-    0: [0.3949, 0.3759, 0.0281, 0.0120, 0.1890, 0.0],
-    1: [0.5072, 0.2483, 0.0199, 0.0139, 0.1914, 0.0],
-    2: [0.5701, 0.1653, 0.0151, 0.0107, 0.2152, 0.0],
-    3: [0.6218, 0.1140, 0.0114, 0.0077, 0.2153, 0.0],
-    4: [0.6422, 0.0886, 0.0086, 0.0081, 0.2280, 0.0],
-    5: [0.6850, 0.0695, 0.0069, 0.0063, 0.2049, 0.0],
-    6: [0.6945, 0.0422, 0.0037, 0.0055, 0.2197, 0.0],
-    7: [0.6878, 0.0220, 0.0016, 0.0034, 0.2793, 0.0],
-    8: [0.7396, 0.0103, 0.0009, 0.0015, 0.2478, 0.0],
-    9: [0.8153, 0.0082, 0.0003, 0.0021, 0.1741, 0.0],
+STATIC_TERRAIN = {OCEAN, MOUNTAIN_T}
+
+# ====================================================================
+# LAYER 1: EMPIRICAL MODEL — exact data from ground truth analysis
+# ====================================================================
+# Format: dist → [empty, settlement, port, ruin, forest, mountain]
+# Class indices: 0=empty, 1=settlement, 2=port, 3=ruin, 4=forest, 5=mountain
+# Values computed directly from GT[row][col][class_idx] — indices match API format
+
+# ALL DYNAMIC CELLS by distance to nearest settlement — ALIVE worlds (R1,2,4,5,6,7,9,11,12,13)
+ALIVE_BY_DIST = {
+    0: [0.39495, 0.37592, 0.01196, 0.02813, 0.18905, 0.0],
+    1: [0.51721, 0.25314, 0.01421, 0.02026, 0.19518, 0.0],
+    2: [0.58384, 0.16931, 0.01098, 0.01548, 0.22040, 0.0],
+    3: [0.64098, 0.11753, 0.00791, 0.01171, 0.22188, 0.0],
+    4: [0.65834, 0.09079, 0.00835, 0.00879, 0.23373, 0.0],
+    5: [0.70422, 0.07149, 0.00653, 0.00709, 0.21068, 0.0],
+    6: [0.71921, 0.04375, 0.00573, 0.00378, 0.22752, 0.0],
+    7: [0.69185, 0.02214, 0.00342, 0.00158, 0.28101, 0.0],
+    8: [0.73958, 0.01025, 0.00150, 0.00092, 0.24775, 0.0],
+    9: [0.81529, 0.00824, 0.00206, 0.00029, 0.17412, 0.0],
 }
 
-# Land (terrain=11) ved ulike avstander, DEAD worlds
-LAND_DEAD = {
-    0: [0.6343, 0.0509, 0.0088, 0.0018, 0.3042, 0.0],
-    1: [0.6997, 0.0289, 0.0049, 0.0009, 0.2495, 0.0],
-    2: [0.7096, 0.0143, 0.0025, 0.0008, 0.2545, 0.0],
-    3: [0.7100, 0.0070, 0.0012, 0.0004, 0.2600, 0.0],
-    4: [0.7100, 0.0035, 0.0006, 0.0002, 0.2700, 0.0],
-    5: [0.7100, 0.0018, 0.0003, 0.0001, 0.2800, 0.0],
+# ALL DYNAMIC CELLS by distance — DEAD worlds (R3,R8,R10)
+DEAD_BY_DIST = {
+    0: [0.63430, 0.05088, 0.00180, 0.00879, 0.30423, 0.0],
+    1: [0.71114, 0.02936, 0.00094, 0.00498, 0.25358, 0.0],
+    2: [0.72280, 0.01459, 0.00081, 0.00257, 0.25922, 0.0],
+    3: [0.73402, 0.00688, 0.00064, 0.00118, 0.25728, 0.0],
+    4: [0.73270, 0.00229, 0.00022, 0.00042, 0.26437, 0.0],
+    5: [0.66060, 0.00109, 0.00016, 0.00018, 0.33797, 0.0],
+    6: [0.80964, 0.00012, 0.00000, 0.00000, 0.19024, 0.0],
+    7: [0.80000, 0.00000, 0.00000, 0.00000, 0.20000, 0.0],
+    8: [1.00000, 0.00000, 0.00000, 0.00000, 0.00000, 0.0],
 }
 
-# Forest (terrain=4) ved ulike avstander fra settlement, ALIVE
-FOREST_ALIVE = {
-    0: [0.1500, 0.3000, 0.0150, 0.0100, 0.5250, 0.0],
-    1: [0.1206, 0.2636, 0.0120, 0.0100, 0.5794, 0.0],
-    2: [0.0869, 0.1747, 0.0090, 0.0080, 0.7131, 0.0],
-    3: [0.0631, 0.1202, 0.0060, 0.0060, 0.7969, 0.0],
-    4: [0.0450, 0.0800, 0.0040, 0.0040, 0.8600, 0.0],
-    5: [0.0350, 0.0550, 0.0025, 0.0030, 0.8980, 0.0],
-    6: [0.0250, 0.0350, 0.0015, 0.0020, 0.9300, 0.0],
-    7: [0.0154, 0.0154, 0.0008, 0.0010, 0.9674, 0.0],
-    8: [0.0100, 0.0080, 0.0004, 0.0005, 0.9811, 0.0],
-    9: [0.0080, 0.0040, 0.0002, 0.0003, 0.9875, 0.0],
+# INITIAL FOREST cells by distance — ALIVE worlds
+FOREST_ALIVE_BY_DIST = {
+    1: [0.12154, 0.26360, 0.01411, 0.02138, 0.57937, 0.0],
+    2: [0.08658, 0.17465, 0.00996, 0.01567, 0.71313, 0.0],
+    3: [0.06365, 0.12016, 0.00710, 0.01215, 0.79694, 0.0],
+    4: [0.04057, 0.09177, 0.00940, 0.00894, 0.84933, 0.0],
+    5: [0.02574, 0.07420, 0.00488, 0.00675, 0.88843, 0.0],
+    6: [0.01119, 0.04275, 0.00531, 0.00325, 0.93750, 0.0],
+    7: [0.00260, 0.01542, 0.00292, 0.00125, 0.97781, 0.0],
+    8: [0.00167, 0.00867, 0.00167, 0.00100, 0.98700, 0.0],
+    9: [0.00000, 0.01333, 0.00333, 0.00000, 0.98333, 0.0],
 }
 
-# Forest (terrain=4) ved ulike avstander, DEAD
-FOREST_DEAD = {
-    0: [0.0650, 0.0300, 0.0020, 0.0010, 0.9020, 0.0],
-    1: [0.0500, 0.0150, 0.0010, 0.0005, 0.9335, 0.0],
-    2: [0.0400, 0.0080, 0.0005, 0.0003, 0.9512, 0.0],
-    3: [0.0300, 0.0040, 0.0003, 0.0001, 0.9656, 0.0],
-    4: [0.0250, 0.0020, 0.0001, 0.0001, 0.9728, 0.0],
-    5: [0.0200, 0.0010, 0.0001, 0.0001, 0.9788, 0.0],
+# INITIAL FOREST cells by distance — DEAD worlds
+FOREST_DEAD_BY_DIST = {
+    1: [0.10899, 0.03030, 0.00063, 0.00549, 0.85460, 0.0],
+    2: [0.03807, 0.01430, 0.00085, 0.00222, 0.94457, 0.0],
+    3: [0.02180, 0.00612, 0.00073, 0.00107, 0.97028, 0.0],
+    4: [0.00723, 0.00256, 0.00017, 0.00067, 0.98937, 0.0],
+    5: [0.00300, 0.00123, 0.00015, 0.00023, 0.99538, 0.0],
+    6: [0.00219, 0.00031, 0.00000, 0.00000, 0.99750, 0.0],
+    7: [0.00000, 0.00000, 0.00000, 0.00000, 1.00000, 0.0],
 }
 
-# Settlement-celler (terrain=1), betinget på vitality
-# Vitality 0.0=dead, 0.5=stable, 1.0=booming
-SETTLEMENT_BY_VITALITY = {
-    # vitality: [empty, settlement, port, ruin, forest, mountain]
-    0.0: [0.5640, 0.0200, 0.0030, 0.0060, 0.4070, 0.0],
-    0.2: [0.5000, 0.1000, 0.0040, 0.0150, 0.3810, 0.0],
-    0.4: [0.4200, 0.2500, 0.0050, 0.0250, 0.3000, 0.0],
-    0.5: [0.3850, 0.3980, 0.0040, 0.0310, 0.1830, 0.0],
-    0.6: [0.3500, 0.4200, 0.0060, 0.0350, 0.1890, 0.0],
-    0.8: [0.3090, 0.5020, 0.0160, 0.0290, 0.1440, 0.0],
-    1.0: [0.2600, 0.5700, 0.0200, 0.0350, 0.1150, 0.0],
-}
-
-# Port-settlement-celler (terrain=2 / has_port=True)
-PORT_SETTLEMENT_BY_VITALITY = {
-    0.0: [0.5680, 0.0100, 0.0050, 0.0050, 0.4120, 0.0],
-    0.5: [0.4600, 0.0510, 0.1010, 0.0200, 0.2700, 0.0],
-    1.0: [0.3500, 0.0800, 0.2000, 0.0300, 0.1800, 0.0],
+# Initial terrain type → GT (aggregated across ALL rounds, ALL distances)
+TERRAIN_TO_GT_ALL = {
+    SETTLEMENT_T: [0.45179, 0.30208, 0.00598, 0.02363, 0.21652, 0.0],
+    RUIN_T:       [0.56763, 0.05079, 0.10132, 0.01158, 0.26868, 0.0],
+    FOREST_T:     [0.06953, 0.12682, 0.00761, 0.01155, 0.78448, 0.0],
+    PLAINS:       [0.82921, 0.12001, 0.00805, 0.01100, 0.03173, 0.0],
 }
 
 
-def _chebyshev_distance(y, x, settlements):
-    """Chebyshev distance til nærmeste settlement."""
+def _chebyshev_dist(y, x, settlements):
     if not settlements:
         return 99
     return min(max(abs(x - s["x"]), abs(y - s["y"])) for s in settlements)
 
 
-def _is_coastal(grid, y, x):
-    """Sjekk om cellen grenser til vann (terrain 10 eller 5)."""
+def _is_coastal(grid, y, x, H=40, W=40):
     for dy in [-1, 0, 1]:
         for dx in [-1, 0, 1]:
             ny, nx = y + dy, x + dx
-            if 0 <= ny < MAP_H and 0 <= nx < MAP_W:
-                if grid[ny][nx] in (10, 5):
+            if 0 <= ny < H and 0 <= nx < W:
+                if grid[ny][nx] == OCEAN:
                     return True
     return False
 
 
-def _interpolate_vitality(table, vitality):
-    """Interpoler mellom to nærmeste vitality-verdier i tabell."""
-    keys = sorted(table.keys())
-    if vitality <= keys[0]:
-        return np.array(table[keys[0]], dtype=float)
-    if vitality >= keys[-1]:
-        return np.array(table[keys[-1]], dtype=float)
-
-    # Finn de to nærmeste
-    for i in range(len(keys) - 1):
-        if keys[i] <= vitality <= keys[i + 1]:
-            lo, hi = keys[i], keys[i + 1]
-            t = (vitality - lo) / (hi - lo)
-            arr = (1 - t) * np.array(table[lo]) + t * np.array(table[hi])
-            return arr
-    return np.array(table[keys[-1]], dtype=float)
-
-
-def _get_dist_table(table, dist):
-    """Hent distribusjon fra avstandstabell, clamp til maks key."""
-    max_key = max(table.keys())
-    d = min(dist, max_key)
+def _get_from_table(table, dist):
+    """Get distribution from distance table with clamping."""
+    max_d = max(table.keys())
+    min_d = min(table.keys())
+    d = max(min_d, min(dist, max_d))
     if d in table:
         return np.array(table[d], dtype=float)
-    # Interpoler
+    # Interpolate
     keys = sorted(table.keys())
     for i in range(len(keys) - 1):
         if keys[i] <= d <= keys[i + 1]:
             lo, hi = keys[i], keys[i + 1]
             t = (d - lo) / (hi - lo)
             return (1 - t) * np.array(table[lo]) + t * np.array(table[hi])
-    return np.array(table[max_key], dtype=float)
+    return np.array(table[max_d], dtype=float)
 
 
-def predict_distribution(grid, settlements, vitality=0.5,
-                         coastal_ruin_boost=True, floor=0.005):
+def empirical_predict(grid, settlements, vitality=0.5, floor=0.005):
     """
-    Prediker 40×40×6 sannsynlighetsfordeling basert på:
-    - Initial grid og settlements
-    - Vitality parameter (0.0=dead, 1.0=booming)
+    Layer 1: Empirical model using exact ground truth statistics.
 
-    Returns: np.array shape (40, 40, 6)
+    Args:
+        grid: 40×40 initial grid (terrain codes)
+        settlements: list of {x, y, has_port, ...}
+        vitality: 0.0=dead, 0.5=stable, 1.0=booming
+        floor: minimum probability per class
+
+    Returns: (40, 40, 6) probability tensor
     """
     grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
-    pred = np.zeros((MAP_H, MAP_W, NUM_CLASSES), dtype=float)
+    H, W = grid_arr.shape
+    pred = np.zeros((H, W, NUM_CLASSES), dtype=float)
 
-    # Velg tabeller basert på vitality
     is_dead = vitality < 0.15
 
-    for y in range(MAP_H):
-        for x in range(MAP_W):
+    for y in range(H):
+        for x in range(W):
             terrain = int(grid_arr[y, x])
 
-            # Statiske celler
-            if terrain == 10 or terrain == 5:  # Ocean / shallow water
-                pred[y, x] = [0.998, 0.0004, 0.0004, 0.0004, 0.0004, 0.0004]
+            # Static: ocean
+            if terrain == OCEAN:
+                pred[y, x] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 continue
 
-            # Mountain — terrain code 5 er egentlig vann per analyse
-            # Men sjekk om det finnes ekte mountain-celler
-            # TERRAIN_TO_CLASS: 5 → mountain. Behold for sikkerhets skyld.
+            # Static: mountain
+            if terrain == MOUNTAIN_T:
+                pred[y, x] = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                continue
 
-            dist = _chebyshev_distance(y, x, settlements)
-            coastal = _is_coastal(grid_arr.tolist(), y, x)
+            dist = _chebyshev_dist(y, x, settlements)
 
-            if terrain == 1:
-                # Settlement-celle
-                p = _interpolate_vitality(SETTLEMENT_BY_VITALITY, vitality)
-            elif terrain == 2:
-                # Port-settlement
-                p = _interpolate_vitality(PORT_SETTLEMENT_BY_VITALITY, vitality)
-            elif terrain == 4:
-                # Forest
+            if terrain == FOREST_T:
+                # Initial forest cell — use terrain-specific tables
                 if is_dead:
-                    p = _get_dist_table(FOREST_DEAD, dist)
+                    p = _get_from_table(FOREST_DEAD_BY_DIST, dist)
                 else:
-                    # Interpoler mellom dead og alive basert på vitality
-                    dead_p = _get_dist_table(FOREST_DEAD, dist)
-                    alive_p = _get_dist_table(FOREST_ALIVE, dist)
-                    t = min(1.0, vitality / 0.5)  # 0→dead, 0.5+→alive
-                    p = (1 - t) * dead_p + t * alive_p
-            else:
-                # Land (terrain=11, 0, 3, etc.)
-                if is_dead:
-                    p = _get_dist_table(LAND_DEAD, dist)
-                else:
-                    dead_p = _get_dist_table(LAND_DEAD, dist)
-                    alive_p = _get_dist_table(LAND_ALIVE, dist)
+                    dead_p = _get_from_table(FOREST_DEAD_BY_DIST, dist)
+                    alive_p = _get_from_table(FOREST_ALIVE_BY_DIST, dist)
+                    # Blend based on vitality (0→dead, 0.5→alive)
                     t = min(1.0, vitality / 0.5)
                     p = (1 - t) * dead_p + t * alive_p
 
-            # Coastal adjustments
-            if coastal and not is_dead:
-                # Boost port probability for coastal cells near settlements
-                if dist <= 3:
-                    port_boost = max(0, 0.03 - 0.008 * dist)
-                    p[2] += port_boost
-                # Ruin er KUN kystfenomen (fra data: inland ruin = 0.0000)
-                if coastal_ruin_boost and dist <= 5:
-                    pass  # Ruin allerede i tabellen for coastal
+            elif terrain == SETTLEMENT_T:
+                # Initial settlement cell — highly dependent on vitality
+                # Use the aggregate data: survival at dist=0
+                if is_dead:
+                    p = _get_from_table(DEAD_BY_DIST, 0)
+                else:
+                    dead_p = _get_from_table(DEAD_BY_DIST, 0)
+                    alive_p = _get_from_table(ALIVE_BY_DIST, 0)
+                    t = min(1.0, vitality / 0.5)
+                    p = (1 - t) * dead_p + t * alive_p
+                # Boost settlement/ruin for settlement cells relative to generic dist=0
+                # GT data: settlement cells avg [0.452, 0.302, 0.006, 0.024, 0.217, 0]
+                # Generic dist=0 alive: [0.395, 0.376, 0.012, 0.028, 0.189, 0]
+                # Settlement cells are slightly less likely to still be settlements
+                # but we want terrain-specific behavior
+                if not is_dead:
+                    terrain_specific = np.array(TERRAIN_TO_GT_ALL[SETTLEMENT_T])
+                    # Blend 50% generic distance + 50% terrain-specific
+                    p = 0.5 * p + 0.5 * terrain_specific
 
-            if not coastal:
-                # Inland: ruin og port er nesten null
-                p[2] = 0.0  # Port umulig inland
-                p[3] = 0.0  # Ruin umulig inland (per data)
-                # Redistribuer til empty og forest
-                surplus = 1.0 - p.sum()
-                if surplus < 0:
-                    p[0] += surplus * 0.7
-                    p[4] += surplus * 0.3
+            elif terrain == RUIN_T:
+                # Initial ruin cell
+                if is_dead:
+                    p = _get_from_table(DEAD_BY_DIST, dist)
+                    # Boost ruin probability for initial ruin cells
+                    p[2] *= 3.0  # ruin stays ruin more
+                else:
+                    alive_p = _get_from_table(ALIVE_BY_DIST, dist)
+                    # Terrain-specific: ruins have 10% chance to stay ruin
+                    terrain_spec = np.array(TERRAIN_TO_GT_ALL[RUIN_T])
+                    p = 0.4 * alive_p + 0.6 * terrain_spec
 
-            # Mountain alltid umulig på dynamisk celle
+            elif terrain == PORT_T:
+                # Initial port cell — similar to settlement but with port boost
+                if is_dead:
+                    p = _get_from_table(DEAD_BY_DIST, 0)
+                else:
+                    alive_p = _get_from_table(ALIVE_BY_DIST, 0)
+                    p = alive_p.copy()
+                    p[3] *= 2.0  # boost port probability
+                    p[1] *= 0.8  # slightly less regular settlement
+
+            else:
+                # Plains (11), empty (0), or other land
+                if is_dead:
+                    p = _get_from_table(DEAD_BY_DIST, dist)
+                else:
+                    dead_p = _get_from_table(DEAD_BY_DIST, dist)
+                    alive_p = _get_from_table(ALIVE_BY_DIST, dist)
+                    t = min(1.0, vitality / 0.5)
+                    p = (1 - t) * dead_p + t * alive_p
+
+            # Mountain class always 0 for dynamic cells
             p[5] = 0.0
 
-            # Normaliser
+            # Normalize
             p = np.maximum(p, 0.0)
-            s = p.sum()
-            if s > 0:
-                p /= s
+            total = p.sum()
+            if total > 0:
+                p /= total
 
-            # Floor via linear mixing
+            # Apply floor via Joakim's method: p*(1-6ε)+ε
             eps = floor
             p = p * (1 - NUM_CLASSES * eps) + eps
             p /= p.sum()
@@ -247,53 +263,390 @@ def predict_distribution(grid, settlements, vitality=0.5,
     return pred
 
 
+# ====================================================================
+# LAYER 2: MONTE CARLO FORWARD SIMULATOR
+# ====================================================================
+
+@dataclass
+class SimParams:
+    """Hidden simulation parameters shared across seeds in a round."""
+    winter_severity: float = 0.3    # 0-1: how deadly winters are
+    growth_rate: float = 0.08       # expansion probability per year
+    raid_intensity: float = 0.1     # raid frequency
+    raid_kill_prob: float = 0.3     # probability raid kills defender
+    forest_spread: float = 0.03     # forest expansion rate
+    forest_reclaim: float = 0.05    # ruin → forest rate
+    port_develop: float = 0.02      # coastal settlement → port
+    trade_bonus: float = 0.15       # food bonus from ports/trade
+    settle_reclaim: float = 0.04    # ruin → settlement (if adj settlement)
+    forest_food: float = 0.1        # food bonus from adjacent forest
+
+
+@dataclass
+class Cell:
+    """Mutable cell state for simulation."""
+    population: float = 1.0
+    food: float = 1.0
+    wealth: float = 0.0
+    defense: float = 0.5
+    has_port: bool = False
+    alive: bool = True
+    owner_id: int = 0
+
+
+class ForwardSimulator:
+    """Run N independent simulations → probability distributions."""
+
+    def __init__(self, initial_grid, initial_settlements,
+                 params: SimParams, n_years=50):
+        self.initial_grid = np.array(initial_grid, dtype=int)
+        self.initial_settlements = initial_settlements
+        self.params = params
+        self.n_years = n_years
+        self.H, self.W = self.initial_grid.shape
+
+        # Precompute static masks
+        self.land_mask = ~np.isin(self.initial_grid, [OCEAN, MOUNTAIN_T])
+        self.coastal = np.zeros((self.H, self.W), dtype=bool)
+        for r in range(self.H):
+            for c in range(self.W):
+                if self.land_mask[r, c]:
+                    for dr in [-1, 0, 1]:
+                        for dc in [-1, 0, 1]:
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < self.H and 0 <= nc < self.W:
+                                if self.initial_grid[nr, nc] == OCEAN:
+                                    self.coastal[r, c] = True
+
+    def _init_state(self, rng):
+        """Create fresh simulation state."""
+        grid = self.initial_grid.copy()
+        cells = {}
+
+        for i, s in enumerate(self.initial_settlements):
+            sx, sy = s["x"], s["y"]
+            has_port = s.get("has_port", False)
+            cells[(sy, sx)] = Cell(
+                population=1.0 + rng.random() * 2.0,
+                food=0.5 + rng.random() * 1.5,
+                wealth=rng.random() * 0.5,
+                defense=0.3 + rng.random() * 0.4,
+                has_port=has_port,
+                owner_id=i,
+            )
+            grid[sy, sx] = PORT_T if has_port else SETTLEMENT_T
+
+        return grid, cells
+
+    def _neighbors(self, r, c):
+        result = []
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.H and 0 <= nc < self.W and self.land_mask[nr, nc]:
+                    result.append((nr, nc))
+        return result
+
+    def _count_adj_type(self, grid, r, c, terrain):
+        return sum(1 for nr, nc in self._neighbors(r, c) if grid[nr, nc] == terrain)
+
+    def _count_adj_settlements(self, grid, r, c):
+        return sum(1 for nr, nc in self._neighbors(r, c)
+                   if grid[nr, nc] in (SETTLEMENT_T, PORT_T))
+
+    def _run_one(self, seed):
+        """Run one full simulation."""
+        rng = random.Random(seed)
+        p = self.params
+        grid, cells = self._init_state(rng)
+
+        for year in range(self.n_years):
+            # === GROWTH ===
+            active = [(pos, c) for pos, c in cells.items() if c.alive]
+            for (r, c_), cell in active:
+                adj_forest = self._count_adj_type(grid, r, c_, FOREST_T)
+                food_prod = 0.3 + adj_forest * 0.15
+                if cell.has_port:
+                    food_prod += p.trade_bonus
+                cell.food = min(cell.food + food_prod, 3.0)
+
+                if cell.food > 0.5:
+                    growth = 0.1 * cell.food * (1.0 - cell.population / 5.0)
+                    cell.population = min(cell.population + max(0, growth), 5.0)
+
+                cell.defense = min(cell.defense + 0.02 * cell.wealth, 1.0)
+
+                # Expansion
+                if cell.population > 1.5 and cell.food > 0.8:
+                    exp_chance = p.growth_rate * (cell.population / 3.0)
+                    if rng.random() < exp_chance:
+                        candidates = [
+                            (nr, nc) for nr, nc in self._neighbors(r, c_)
+                            if grid[nr, nc] in (EMPTY_T, PLAINS)
+                        ]
+                        if candidates:
+                            nr, nc = rng.choice(candidates)
+                            new_cell = Cell(
+                                population=0.5 + rng.random() * 0.5,
+                                food=cell.food * 0.3,
+                                wealth=cell.wealth * 0.1,
+                                defense=0.2 + rng.random() * 0.2,
+                                owner_id=cell.owner_id,
+                            )
+                            cells[(nr, nc)] = new_cell
+                            grid[nr, nc] = SETTLEMENT_T
+                            cell.population *= 0.8
+                            cell.food *= 0.7
+
+                # Port development
+                if not cell.has_port and self.coastal[r, c_]:
+                    if rng.random() < p.port_develop * (1 + cell.wealth):
+                        cell.has_port = True
+                        grid[r, c_] = PORT_T
+
+            # === CONFLICT ===
+            active = [(pos, c) for pos, c in cells.items() if c.alive]
+            rng.shuffle(active)
+            for (r, c_), attacker in active:
+                if not attacker.alive:
+                    continue
+                desperation = max(0, 1.0 - attacker.food)
+                if rng.random() < p.raid_intensity * (0.3 + 0.7 * desperation):
+                    targets = [
+                        ((nr, nc), cells[(nr, nc)])
+                        for nr, nc in self._neighbors(r, c_)
+                        if (nr, nc) in cells and cells[(nr, nc)].alive
+                        and cells[(nr, nc)].owner_id != attacker.owner_id
+                    ]
+                    if targets:
+                        (tr, tc), defender = rng.choice(targets)
+                        att_str = attacker.population * (0.5 + 0.5 * attacker.defense)
+                        def_str = defender.population * (0.5 + 0.5 * defender.defense)
+                        if att_str > def_str * (0.8 + rng.random() * 0.4):
+                            attacker.food += defender.food * 0.5
+                            attacker.wealth += defender.wealth * 0.5
+                            if rng.random() < p.raid_kill_prob:
+                                defender.alive = False
+                                grid[tr, tc] = RUIN_T
+                            else:
+                                defender.population *= 0.5
+                                defender.food *= 0.3
+                        else:
+                            attacker.population *= 0.7
+                            attacker.food *= 0.5
+
+            # === TRADE ===
+            ports = [(pos, c) for pos, c in cells.items() if c.alive and c.has_port]
+            for (r, c_), port in ports:
+                if port.alive:
+                    port.wealth += 0.1 + 0.05 * len(ports)
+                    port.food += p.trade_bonus
+
+            # === WINTER ===
+            severity = p.winter_severity * (0.5 + rng.random())
+            active = [(pos, c) for pos, c in cells.items() if c.alive]
+            for (r, c_), cell in active:
+                food_needed = 0.3 + 0.1 * cell.population
+                cell.food -= food_needed
+                adj_forest = self._count_adj_type(grid, r, c_, FOREST_T)
+                cell.food += adj_forest * p.forest_food * 0.5
+
+                food_factor = max(0, 1.0 - cell.food) if cell.food < 0.5 else 0
+                death_chance = severity * (0.2 + 0.8 * food_factor)
+                if cell.has_port:
+                    death_chance *= 0.6
+                death_chance *= (1.0 - 0.3 * cell.defense)
+
+                if rng.random() < death_chance:
+                    cell.alive = False
+                    grid[r, c_] = RUIN_T
+                else:
+                    cell.food = max(cell.food, 0.0)
+
+            # === ENVIRONMENT ===
+            # Ruins → settlement or forest
+            ruin_cells = [(r, c) for r in range(self.H) for c in range(self.W)
+                          if grid[r, c] == RUIN_T]
+            for r, c_ in ruin_cells:
+                adj_sett = self._count_adj_settlements(grid, r, c_)
+                if adj_sett > 0 and rng.random() < p.settle_reclaim * adj_sett:
+                    best_owner = 0
+                    best_str = 0
+                    for nr, nc in self._neighbors(r, c_):
+                        if (nr, nc) in cells and cells[(nr, nc)].alive:
+                            s = cells[(nr, nc)]
+                            str_ = s.population * (0.5 + 0.5 * s.defense)
+                            if str_ > best_str:
+                                best_str = str_
+                                best_owner = s.owner_id
+                    new_cell = Cell(
+                        population=0.3 + rng.random() * 0.3,
+                        food=0.3, wealth=0.0, defense=0.2,
+                        owner_id=best_owner,
+                    )
+                    if self.coastal[r, c_] and rng.random() < 0.3:
+                        new_cell.has_port = True
+                        grid[r, c_] = PORT_T
+                    else:
+                        grid[r, c_] = SETTLEMENT_T
+                    cells[(r, c_)] = new_cell
+                    continue
+
+                adj_forest = self._count_adj_type(grid, r, c_, FOREST_T)
+                if rng.random() < p.forest_reclaim * (1 + adj_forest * 0.5):
+                    grid[r, c_] = FOREST_T
+                    if (r, c_) in cells:
+                        del cells[(r, c_)]
+
+            # Forest spread
+            forest_cells = [(r, c) for r in range(self.H) for c in range(self.W)
+                            if grid[r, c] == FOREST_T]
+            new_forests = []
+            for r, c_ in forest_cells:
+                for nr, nc in self._neighbors(r, c_):
+                    if grid[nr, nc] in (EMPTY_T, PLAINS):
+                        adj_f = self._count_adj_type(grid, nr, nc, FOREST_T)
+                        if rng.random() < p.forest_spread * (0.5 + 0.5 * adj_f / 8):
+                            new_forests.append((nr, nc))
+
+            for r, c_ in new_forests:
+                if grid[r, c_] in (EMPTY_T, PLAINS):
+                    grid[r, c_] = FOREST_T
+
+        return grid
+
+    def run_monte_carlo(self, n_sims=200, floor=0.005):
+        """Run N simulations and return probability tensor H×W×6."""
+        counts = np.zeros((self.H, self.W, NUM_CLASSES), dtype=float)
+
+        # Mapping: terrain code → class index
+        # Class 2 = Port (terrain 2), Class 3 = Ruin (terrain 3)
+        code_to_class = {
+            OCEAN: 0, PLAINS: 0, EMPTY_T: 0,
+            SETTLEMENT_T: 1, PORT_T: 2, RUIN_T: 3,
+            FOREST_T: 4, MOUNTAIN_T: 5,
+        }
+
+        for i in range(n_sims):
+            final = self._run_one(seed=i * 12345 + 42)
+            for r in range(self.H):
+                for c in range(self.W):
+                    cls = code_to_class.get(int(final[r, c]), 0)
+                    counts[r, c, cls] += 1
+
+        probs = counts / n_sims
+
+        # Apply floor
+        eps = floor
+        probs = probs * (1 - NUM_CLASSES * eps) + eps
+        probs /= probs.sum(axis=-1, keepdims=True)
+
+        # Force static cells
+        for r in range(self.H):
+            for c in range(self.W):
+                if self.initial_grid[r, c] == OCEAN:
+                    probs[r, c] = [1.0 - 5 * eps, eps, eps, eps, eps, eps]
+                elif self.initial_grid[r, c] == MOUNTAIN_T:
+                    probs[r, c] = [eps, eps, eps, eps, eps, 1.0 - 5 * eps]
+
+        return probs
+
+
+# ====================================================================
+# PARAMETER PRESETS
+# ====================================================================
+
+DEAD_PARAMS = SimParams(
+    winter_severity=0.65, growth_rate=0.03, raid_intensity=0.15,
+    raid_kill_prob=0.5, forest_spread=0.04, forest_reclaim=0.08,
+    port_develop=0.005, trade_bonus=0.1, settle_reclaim=0.01,
+    forest_food=0.05,
+)
+
+STABLE_PARAMS = SimParams(
+    winter_severity=0.35, growth_rate=0.06, raid_intensity=0.1,
+    raid_kill_prob=0.3, forest_spread=0.03, forest_reclaim=0.05,
+    port_develop=0.015, trade_bonus=0.15, settle_reclaim=0.03,
+    forest_food=0.1,
+)
+
+BOOM_PARAMS = SimParams(
+    winter_severity=0.15, growth_rate=0.10, raid_intensity=0.08,
+    raid_kill_prob=0.25, forest_spread=0.02, forest_reclaim=0.04,
+    port_develop=0.025, trade_bonus=0.2, settle_reclaim=0.05,
+    forest_food=0.12,
+)
+
+
+# ====================================================================
+# VITALITY INFERENCE
+# ====================================================================
+
 def infer_vitality_from_observations(observers, settlements_per_seed):
     """
-    Inferér vitality fra observasjoner.
-
-    Sjekk: av observerte settlement-celler, hvor mange er fortsatt settlements?
-    - survival_rate > 0.4 → booming (vitality 0.8-1.0)
-    - survival_rate 0.2-0.4 → stable (vitality 0.4-0.6)
-    - survival_rate < 0.1 → dead (vitality 0.0-0.1)
+    Infer vitality from observations.
+    Check: of observed initial settlement cells, how many are still settlements?
     """
-    total_initial_settlements = 0
-    total_survived = 0
+    total = 0
+    survived = 0.0
 
     for obs, settlements in zip(observers, settlements_per_seed):
         for s in settlements:
             sx, sy = s["x"], s["y"]
             if 0 <= sx < MAP_W and 0 <= sy < MAP_H:
-                if obs.observed[sy, sx] > 0:
-                    total_initial_settlements += 1
-                    # Sjekk om cellen fortsatt er settlement (class 1)
-                    if obs.counts[sy, sx, 1] > 0:
-                        total_survived += obs.counts[sy, sx, 1] / obs.observed[sy, sx]
+                if hasattr(obs, 'observed') and obs.observed[sy, sx] > 0:
+                    total += 1
+                    if hasattr(obs, 'counts'):
+                        survived += obs.counts[sy, sx, 1] / obs.observed[sy, sx]
 
-    if total_initial_settlements == 0:
-        return 0.5  # Ingen data, default
+    if total == 0:
+        return 0.5  # No data
 
-    survival_rate = total_survived / total_initial_settlements
-
-    # Map survival rate til vitality
-    if survival_rate < 0.05:
+    rate = survived / total
+    if rate < 0.05:
         return 0.0
-    elif survival_rate < 0.15:
-        return 0.1 + survival_rate
-    elif survival_rate < 0.30:
-        return 0.3 + survival_rate * 0.5
-    elif survival_rate < 0.50:
-        return 0.5 + (survival_rate - 0.3) * 1.0
+    elif rate < 0.15:
+        return 0.1 + rate
+    elif rate < 0.30:
+        return 0.3 + rate * 0.5
+    elif rate < 0.50:
+        return 0.5 + (rate - 0.3) * 1.0
     else:
-        return min(1.0, 0.7 + (survival_rate - 0.5) * 0.6)
+        return min(1.0, 0.7 + (rate - 0.5) * 0.6)
 
 
-def score_from_kl(wkl):
-    """Convert weighted KL divergence to score."""
-    return max(0, min(100, 100 * np.exp(-3 * wkl)))
+def params_from_vitality(vitality):
+    """Get simulation parameters based on vitality."""
+    if vitality < 0.15:
+        return DEAD_PARAMS
+    elif vitality < 0.35:
+        # Interpolate dead → stable
+        t = (vitality - 0.15) / 0.20
+        return _lerp_params(DEAD_PARAMS, STABLE_PARAMS, t)
+    elif vitality < 0.55:
+        return STABLE_PARAMS
+    elif vitality < 0.75:
+        t = (vitality - 0.55) / 0.20
+        return _lerp_params(STABLE_PARAMS, BOOM_PARAMS, t)
+    else:
+        return BOOM_PARAMS
 
+
+def _lerp_params(a: SimParams, b: SimParams, t: float) -> SimParams:
+    """Linear interpolation between two parameter sets."""
+    return SimParams(**{
+        field: getattr(a, field) * (1 - t) + getattr(b, field) * t
+        for field in SimParams.__dataclass_fields__
+    })
+
+
+# ====================================================================
+# SCORING UTILITIES
+# ====================================================================
 
 def weighted_kl(ground_truth, prediction):
-    """Entropy-weighted KL divergence (competition metric)."""
     gt = np.array(ground_truth, dtype=float)
     pred = np.array(prediction, dtype=float)
     gt_safe = np.clip(gt, 1e-12, 1.0)
@@ -304,3 +657,13 @@ def weighted_kl(ground_truth, prediction):
     if tw <= 0:
         return float(cell_kl.mean())
     return float((cell_kl * cell_entropy).sum() / tw)
+
+
+def score_from_kl(wkl):
+    return max(0, min(100, 100 * np.exp(-3 * wkl)))
+
+
+if __name__ == "__main__":
+    print("Simulator v2 loaded OK")
+    print(f"Presets: DEAD, STABLE, BOOM")
+    print(f"Empirical tables: {len(ALIVE_BY_DIST)} alive distances, {len(DEAD_BY_DIST)} dead distances")
