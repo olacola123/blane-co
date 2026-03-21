@@ -39,12 +39,12 @@ API_KEY = os.environ.get("API_KEY", "")
 MAP_W, MAP_H = 40, 40
 NUM_CLASSES = 6
 MAX_VIEWPORT = 15
-PROB_FLOOR = 0.003      # standard floor per klasse
-# Per-vbin optimal floor (fra grid search over 14 runder):
-VBIN_FLOOR = {"DEAD": 0.001, "LOW": 0.002, "MED": 0.003, "HIGH": 0.003}
-SHARP_FLOOR = 0.002     # floor for observerte/statiske celler (mer confidence)
-WIDE_FLOOR = 0.008      # floor for uobserverte usikre celler
-NEAR_ZERO = 0.003       # floor for umulige klasser (port innland, mountain på slette)
+PROB_FLOOR = 0.001      # optimal floor (fra grid search over 14 runder × 5 seeds)
+# Per-vbin optimal floor:
+VBIN_FLOOR = {"DEAD": 0.001, "LOW": 0.001, "MED": 0.001, "HIGH": 0.001}
+SHARP_FLOOR = 0.001     # floor for observerte/statiske celler
+WIDE_FLOOR = 0.003      # floor for uobserverte usikre celler
+NEAR_ZERO = 0.001       # floor for umulige klasser (port innland, mountain på slette)
 DEFAULT_ALPHA = 3.5     # Joakim-inspirert: lavere prior-styrke → obs teller mer
 
 TERRAIN_TO_CLASS = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 0, 11: 0}
@@ -67,6 +67,7 @@ CALIBRATION_BY_TYPE_FILE = Path(__file__).parent / "calibration_by_type.json"
 CALIBRATION_4TYPE_FILE = Path(__file__).parent / "calibration_4type.json"
 CALIBRATION_OPT_FILE = Path(__file__).parent / "calibration_optimized.json"
 SUPER_CALIBRATION_FILE = Path(__file__).parent / "super_calibration.json"
+MODEL_TABLES_FILE = Path(__file__).parent / "model_tables.json"
 LEARNING_FILE = Path(__file__).parent / "learning_state.json"
 
 # Terrain code → terrain group for optimized tables
@@ -98,15 +99,38 @@ def load_optimized_calibration():
 # Built from 14 rounds × 5 seeds = 70 GT datasets, 95k data points
 # Features: vitality_bin × terrain_group × dist_bin × coastal × settle_density × forest_density
 
+_model_cache = None
+
+def load_model_tables():
+    """Load new model tables (built from 14 rounds × 5 seeds = 70 GT datasets)."""
+    global _model_cache
+    if _model_cache is not None:
+        return _model_cache
+    if not MODEL_TABLES_FILE.exists():
+        print("ADVARSEL: Ingen model_tables.json")
+        return None
+    data = json.loads(MODEL_TABLES_FILE.read_text())
+    _model_cache = {
+        "specific": data.get("table_specific", {}),
+        "medium": data.get("table_medium", {}),
+        "simple": data.get("table_simple", {}),
+    }
+    n_spec = len(_model_cache["specific"])
+    n_med = len(_model_cache["medium"])
+    n_simp = len(_model_cache["simple"])
+    print(f"Lastet model v7: {n_spec} specific + {n_med} medium + {n_simp} simple entries")
+    return _model_cache
+
+
+# Also keep old super_calibration as fallback
 _super_cal_cache = None
 
 def load_super_calibration():
-    """Load super-calibration tables (best prior system)."""
+    """Load super-calibration tables (legacy fallback)."""
     global _super_cal_cache
     if _super_cal_cache is not None:
         return _super_cal_cache
     if not SUPER_CALIBRATION_FILE.exists():
-        print("ADVARSEL: Ingen super_calibration.json")
         return None
     data = json.loads(SUPER_CALIBRATION_FILE.read_text())
     _super_cal_cache = {
@@ -114,13 +138,10 @@ def load_super_calibration():
         "density": data.get("table_density", {}),
         "simple": data.get("table_simple", {}),
     }
-    n_spec = len(_super_cal_cache["specific"])
-    n_dens = len(_super_cal_cache["density"])
-    print(f"Lastet super-kalibrering: {n_spec} specific + {n_dens} density entries")
     return _super_cal_cache
 
 
-def _sc_terrain_group(t):
+def _terrain_group(t):
     if t in (0, 11): return "plains"
     elif t == 1: return "settlement"
     elif t == 2: return "port"
@@ -129,7 +150,7 @@ def _sc_terrain_group(t):
     else: return "other"
 
 
-def _sc_dist_bin(d):
+def _dist_bin(d):
     if d <= 0: return 0
     elif d <= 1: return 1
     elif d <= 2: return 2
@@ -139,11 +160,11 @@ def _sc_dist_bin(d):
     else: return 6
 
 
-def _sc_settle_density_bin(n):
+def _settle_density_bin(n):
     return 0 if n == 0 else (1 if n <= 2 else 2)
 
 
-def _sc_forest_density_bin(n):
+def _forest_density_bin(n):
     if n == 0: return 0
     elif n <= 4: return 1
     elif n <= 10: return 2
@@ -152,21 +173,25 @@ def _sc_forest_density_bin(n):
 
 def super_predict(grid, settlements, vbin, floor=None):
     """
-    Build prediction using super-calibration tables.
+    Build prediction using model v7 tables (14 rounds × 5 seeds = 95k data points).
     vbin: "DEAD", "LOW", "MED", "HIGH"
     Returns: (H, W, 6) numpy array
+
+    Cascading lookup: specific → medium → simple → uniform
+    - specific: vbin × terrain × dist × coastal × settle_density × forest_density
+    - medium:   vbin × terrain × dist × coastal
+    - simple:   terrain × dist
     """
     if floor is None:
-        floor = VBIN_FLOOR.get(vbin, 0.003)
+        floor = VBIN_FLOOR.get(vbin, 0.001)
 
-    cal = load_super_calibration()
-    if cal is None:
-        # Fallback to old system
+    model = load_model_tables()
+    if model is None:
         return None
 
-    table_density = cal["density"]
-    table_specific = cal["specific"]
-    table_simple = cal["simple"]
+    table_specific = model["specific"]
+    table_medium = model["medium"]
+    table_simple = model["simple"]
 
     grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
     H, W = grid_arr.shape if hasattr(grid_arr, 'shape') else (len(grid), len(grid[0]))
@@ -214,33 +239,33 @@ def super_predict(grid, settlements, vbin, floor=None):
                         if t == 4:
                             n_forest_r2 += 1
 
-            tg = _sc_terrain_group(terrain)
-            db = _sc_dist_bin(min_dist)
+            tg = _terrain_group(terrain)
+            db = _dist_bin(min_dist)
             c = int(coastal)
-            sdb = _sc_settle_density_bin(n_settle_r3)
-            fdb = _sc_forest_density_bin(n_forest_r2)
+            sdb = _settle_density_bin(n_settle_r3)
+            fdb = _forest_density_bin(n_forest_r2)
 
-            # Cascading lookup: density → specific → simple → uniform
+            # Cascading lookup: specific → medium → simple → uniform
             p = None
 
-            key_d = f"{vbin}_{tg}_{db}_{c}_{sdb}_{fdb}"
-            if key_d in table_density:
-                p = np.array(table_density[key_d]["distribution"])
+            key_spec = f"{vbin}_{tg}_{db}_{c}_{sdb}_{fdb}"
+            if key_spec in table_specific:
+                p = np.array(table_specific[key_spec]["distribution"])
 
             if p is None:
-                key_s = f"{vbin}_{tg}_{db}_{c}"
-                if key_s in table_specific:
-                    p = np.array(table_specific[key_s]["distribution"])
+                key_med = f"{vbin}_{tg}_{db}_{c}"
+                if key_med in table_medium:
+                    p = np.array(table_medium[key_med]["distribution"])
 
             if p is None:
-                key_simple = f"{tg}_{db}"
-                if key_simple in table_simple:
-                    p = np.array(table_simple[key_simple]["distribution"])
+                key_simp = f"{tg}_{db}"
+                if key_simp in table_simple:
+                    p = np.array(table_simple[key_simp]["distribution"])
 
             if p is None:
                 p = np.ones(NUM_CLASSES) / NUM_CLASSES
 
-            # Floor via Joakim's method
+            # Floor via Joakim's linear mixing method
             p = p * (1 - NUM_CLASSES * floor) + floor
             p /= p.sum()
             pred[y, x] = p
@@ -249,12 +274,18 @@ def super_predict(grid, settlements, vbin, floor=None):
 
 
 def vitality_to_vbin(vitality):
-    """Map vitality float to super-calibration bin."""
+    """Map vitality float to model bin.
+    Bins calibrated from 14 rounds × 5 seeds ground truth:
+    DEAD: vitality < 0.08 (rounds 3, 8, 10)
+    LOW:  vitality 0.08-0.20 (rare, only 1 seed in data)
+    MED:  vitality 0.20-0.35 (rounds 4, 9, 13)
+    HIGH: vitality >= 0.35 (rounds 1, 2, 5, 6, 7, 11, 12, 14)
+    """
     if vitality < 0.08:
         return "DEAD"
-    elif vitality < 0.25:
+    elif vitality < 0.20:
         return "LOW"
-    elif vitality < 0.45:
+    elif vitality < 0.35:
         return "MED"
     else:
         return "HIGH"
@@ -314,7 +345,7 @@ class AstarClient:
             print("FEIL: Sett API_KEY=din-jwt-token")
             sys.exit(1)
         self.session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        retries = Retry(total=5, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
         self.session.headers.update({
             "Content-Type": "application/json",
@@ -323,12 +354,12 @@ class AstarClient:
         })
 
     def get(self, path, params=None):
-        r = self.session.get(f"{BASE_URL}/{path.lstrip('/')}", params=params)
+        r = self.session.get(f"{BASE_URL}/{path.lstrip('/')}", params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 
     def post(self, path, data):
-        r = self.session.post(f"{BASE_URL}/{path.lstrip('/')}", json=data)
+        r = self.session.post(f"{BASE_URL}/{path.lstrip('/')}", json=data, timeout=60)
         r.raise_for_status()
         return r.json()
 
@@ -614,13 +645,8 @@ class SeedObserver:
         pred = np.zeros((MAP_H, MAP_W, NUM_CLASSES), dtype=float)
         alpha = self.alpha
 
-        # Type-spesifikk floor: DEAD er sikker (lav floor), BOOM_CONC usikker (høy floor)
-        if world_type == "DEAD":
-            base_floor = 0.002
-        elif world_type == "BOOM_CONC":
-            base_floor = 0.008
-        else:
-            base_floor = 0.005
+        # Optimal floor = 0.001 for alle typer (grid search over 14 runder × 5 seeds)
+        base_floor = 0.001
 
         for y in range(MAP_H):
             for x in range(MAP_W):
@@ -974,14 +1000,12 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
     # Probe-observers (seed 0-1) beholder sine observasjoner men oppdaterer priors
     observers = []
 
-    # Bestem queries per seed for resten
-    # Brukt: 2*2 = 4 probe queries. Gjenstår: queries_per_seed*n_seeds - 4
+    # Bestem queries per seed — bruk ALLE queries
     total_budget = queries_per_seed * n_seeds
-    remaining_budget = total_budget - 4  # 4 probe queries brukt
-    obs_per_seed = max(6, remaining_budget // n_seeds)  # minimum 6 per seed
-    extra_queries = remaining_budget - obs_per_seed * n_seeds
+    queries_used = 4  # probe queries brukt
+    queries_left = total_budget - queries_used
 
-    print(f"  Query-plan: {obs_per_seed}/seed + {max(0,extra_queries)} ekstra")
+    print(f"  Query-plan: {queries_left} queries fordelt på {n_seeds} seeds")
 
     # === FASE 4: OBSERVE ALLE SEEDS ===
     for si in range(n_seeds):
@@ -995,17 +1019,22 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
             obs.opt_tables = opt_tables
             obs.world_type = opt_wtype
             obs._rebuild_priors()  # Rebuild med riktig type
-            remaining_for_seed = obs_per_seed - 2
         else:
             # Seed 2-4: ny observer med opt_tables + korrekt world type
             obs = SeedObserver(grid, settlements, transition_table, simple_prior,
                              alpha=alpha, opt_tables=opt_tables, world_type=opt_wtype)
-            remaining_for_seed = obs_per_seed
 
-        print(f"\n  Seed {si}: {len(settlements)} settlements, {remaining_for_seed} queries")
+        # Gi denne seeden sin andel av gjenstående queries
+        seeds_remaining = n_seeds - si
+        for_this_seed = queries_left // seeds_remaining
+        if si < len(probe_observers):
+            for_this_seed -= 2  # allerede brukt 2 på probe
+        queries_left -= (for_this_seed + (2 if si < len(probe_observers) else 0))
+
+        print(f"\n  Seed {si}: {len(settlements)} settlements, {for_this_seed} queries")
 
         # Planlegg og observer
-        viewports = plan_queries(grid, settlements, n_queries=remaining_for_seed)
+        viewports = plan_queries(grid, settlements, n_queries=for_this_seed)
         for i, (vx, vy, vw, vh) in enumerate(viewports):
             try:
                 result = client.simulate(round_id, si, vx, vy, vw, vh)
@@ -1141,7 +1170,11 @@ def main():
     except Exception:
         pass
 
-    rounds = client.get_rounds()
+    try:
+        rounds = client.get_rounds()
+    except Exception as e:
+        print(f"FEIL: Kunne ikke hente runder: {e}")
+        sys.exit(1)
     if not rounds:
         print("Ingen runder"); sys.exit(1)
 
@@ -1153,7 +1186,11 @@ def main():
             print("Ingen aktive runder."); sys.exit(1)
         round_id = active[-1]["id"]
 
-    round_data = client.get_round(round_id)
+    try:
+        round_data = client.get_round(round_id)
+    except Exception as e:
+        print(f"FEIL: Kunne ikke hente runde {round_id}: {e}")
+        sys.exit(1)
     rnum = round_data.get("round_number", "?")
     weight = round_data.get("round_weight", "?")
     print(f"\nRunde {rnum} (vekt {weight}, alpha={alpha:.1f}): {round_id[:12]}...")
