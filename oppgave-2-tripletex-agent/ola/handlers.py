@@ -250,8 +250,14 @@ baseSalary is the monthly base salary. bonus is additional bonus amount (0 if no
 "prepaidExpenses": [{"description": "prepaid item", "amount": 0.00, "expenseAccount": "expense account number", "prepaidAccount": "1700 or 1710"}],
 "salaryAccrual": {"amount": 0.00, "description": "salary accrual description or empty"},
 "taxRate": 0.22,
-"voucherDate": "YYYY-MM-DD"}
-depreciationAmount: if not given, calculate as originalCost / usefulLifeYears.""",
+"voucherDate": "YYYY-MM-DD",
+"includeResultDisposition": false}
+depreciationAmount: if not given, calculate as originalCost / usefulLifeYears.
+includeResultDisposition: true ONLY if the task explicitly asks for result disposition/closing to equity.""",
+
+    "ledger_audit": """Extract ALL errors described in this accounting task. Return ONLY valid JSON:
+{"errors": [{"type": "wrong_account|duplicate|missing_vat|wrong_amount", "description": "what the error is", "amount": 0.00, "wrongAccount": "account number with the error", "correctAccount": "correct account number", "correctAmount": 0.00, "date": "YYYY-MM-DD"}]}
+type must be one of: wrong_account, duplicate, missing_vat, wrong_amount. Extract ALL errors mentioned.""",
 
     "cost_analysis": """Extract from this accounting task. Return ONLY valid JSON:
 {"employeeEmail": "email of employee to assign as project manager", "month1Start": "YYYY-MM-DD", "month1End": "YYYY-MM-DD", "month2Start": "YYYY-MM-DD", "month2End": "YYYY-MM-DD", "numAccountsToFind": 3}
@@ -266,6 +272,42 @@ partialInvoicePercent: percentage for partial invoice (0 if none mentioned).""",
 
     "timesheet": """Extract from this accounting task. Return ONLY valid JSON:
 {"projectName": "project name", "customerName": "customer company name or empty", "customerOrgNumber": "org number or empty", "customerEmail": "email or empty", "employeeEmail": "employee email", "hours": 0.0, "hourlyRate": 0.00, "date": "YYYY-MM-DD", "description": "activity description or empty"}""",
+
+    "travel_expense": """Extract from this accounting task. Return ONLY valid JSON:
+{"employeeEmail": "employee email", "title": "travel expense title/description", "departureDate": "YYYY-MM-DD", "returnDate": "YYYY-MM-DD", "departureFrom": "departure city/location", "destination": "destination city/location", "purpose": "purpose of travel", "overnightStay": false, "perDiemRate": 0.00, "costs": [{"description": "cost description", "amount": 0.00, "date": "YYYY-MM-DD", "category": "transport/food/accommodation/other"}]}
+overnightStay: true if there was overnight accommodation. perDiemRate: the daily per diem rate if mentioned (0 if not specified, will default to 800).""",
+
+    "delete_travel": """Extract from this accounting task. Return ONLY valid JSON:
+{"employeeEmail": "employee email or empty", "travelExpenseTitle": "title or identifier of travel expense to delete or empty", "travelExpenseId": 0}
+Extract any identifier that can help find the travel expense to delete.""",
+
+    "bank_recon": """Extract from this accounting task. Return ONLY valid JSON:
+{"transactions": [{"date": "YYYY-MM-DD", "amount": 0.00, "reference": "reference/invoice number or empty", "description": "transaction description"}], "dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD"}
+Parse ALL transactions from CSV/bank statement. Positive amounts = incoming payments, negative = outgoing payments.""",
+
+    "project_lifecycle": """Extract from this accounting task. Return ONLY valid JSON:
+{"projectName": "project name", "customerName": "customer company name", "customerOrgNumber": "org number or empty", "customerEmail": "email or empty", "employees": [{"email": "employee email", "hours": 0.0, "hourlyRate": 0.00, "date": "YYYY-MM-DD"}], "supplierCosts": [{"supplierName": "supplier name", "amount": 0.00, "description": "what was purchased", "expenseAccount": "expense account number like 6500", "vatPercent": 25}], "invoiceProducts": [{"name": "product name", "number": "product number", "priceExVat": 0.00, "vatPercent": 25, "quantity": 1}]}
+Extract ALL employees, supplier costs, and invoice products.""",
+
+    "fx_invoice": """Extract from this accounting task. Return ONLY valid JSON:
+{"customerName": "customer name", "customerOrgNumber": "org number or empty", "customerEmail": "email or empty", "invoiceNumber": "invoice number or empty", "invoiceAmount": 0.00, "currency": "currency code like USD/EUR", "oldRate": 0.00, "newRate": 0.00, "paymentDate": "YYYY-MM-DD"}
+oldRate: exchange rate when invoice was created. newRate: exchange rate at payment time.""",
+
+    "reminder_fee": """Extract from this accounting task. Return ONLY valid JSON:
+{"customerName": "customer name", "overdueAmount": 0.00, "reminderFee": 35, "invoiceNumber": "overdue invoice number or empty", "reminderDate": "YYYY-MM-DD", "partialPaymentAmount": 0.00}
+reminderFee defaults to 35 NOK. partialPaymentAmount: if the task mentions a partial payment on the overdue invoice, put the amount here (0 if none).""",
+
+    "month_end": """Extract from this accounting task. Return ONLY valid JSON:
+{"month": 1, "year": 2026, "voucherDate": "YYYY-MM-DD", "assets": [{"name": "asset description", "annualDepreciation": 0.00, "depreciationAccountNumber": "6010", "accumulatedDepAccountNumber": "1209"}], "prepaidExpenses": [{"description": "prepaid item", "totalAmount": 0.00, "months": 12, "expenseAccount": "expense account number", "prepaidAccount": "1710"}]}
+For assets: annualDepreciation is the yearly amount (will be divided by 12 for monthly). For prepaid: totalAmount divided by months gives monthly amount.""",
+
+    "employee_pdf": """Extract from this PDF/document about an employee. Return ONLY valid JSON:
+{"firstName": "first name", "lastName": "last name", "email": "email", "dateOfBirth": "YYYY-MM-DD", "nationalIdentityNumber": "11-digit national ID or empty", "occupationCode": "occupation code like 2310 or empty", "startDate": "YYYY-MM-DD", "salary": 0.00, "percentageOfFullTime": 100.0, "employeeNumber": "employee number as string or empty", "userType": "STANDARD or EXTENDED"}
+Extract ALL fields from the attached PDF document.""",
+
+    "supplier_invoice_pdf": """Extract from this PDF/document about a supplier invoice. Return ONLY valid JSON:
+{"supplierName": "supplier company name", "supplierOrgNumber": "org number or empty", "supplierEmail": "email or empty", "supplierPhone": "phone or empty", "supplierAddress": "street address or empty", "supplierPostalCode": "postal code or empty", "supplierCity": "city or empty", "invoiceNumber": "invoice number", "invoiceDate": "YYYY-MM-DD", "amountInclVat": 0.00, "amountExVat": 0.00, "vatPercent": 25, "description": "what was purchased", "expenseAccount": "expense account number like 6500", "isFood": false}
+Extract from the attached PDF document. isFood: true if food/beverage (15% VAT). expenseAccount: 6540=office, 6340=IT, 6500=supplies, 7300=service, 7100=vehicle, 7140=travel, 6800=other.""",
 }
 
 
@@ -365,17 +407,21 @@ TASK:
 
 def handle_customer(data, session, base_url, ctx):
     trace = []
+    postal = {
+        "addressLine1": _val(data, "addressLine1", ""),
+        "postalCode": _val(data, "postalCode", ""),
+        "city": _val(data, "city", ""),
+    }
+    if postal["addressLine1"] or postal["postalCode"] or postal["city"]:
+        postal["country"] = "NO"
     body = {
         "name": data.get("name", ""),
         "email": _val(data, "email", ""),
         "phoneNumber": _val(data, "phone", ""),
         "isCustomer": True,
         "language": "NO",
-        "postalAddress": {
-            "addressLine1": _val(data, "addressLine1", ""),
-            "postalCode": _val(data, "postalCode", ""),
-            "city": _val(data, "city", ""),
-        },
+        "invoiceSendMethod": "EMAIL",
+        "postalAddress": postal,
     }
     org = _val(data, "orgNumber", "")
     if org:
@@ -759,6 +805,7 @@ def _create_customer_if_needed(data, session, base_url, ctx, trace, prefix="cust
         "phoneNumber": _val(data, f"{prefix}Phone", _val(data, "customerPhone", "")),
         "isCustomer": True,
         "language": "NO",
+        "invoiceSendMethod": "EMAIL",
     }
     org = _val(data, f"{prefix}OrgNumber", _val(data, "customerOrgNumber", ""))
     if org:
@@ -804,6 +851,11 @@ def _create_product(name, number, price_ex_vat, vat_pct, session, base_url, trac
         vals = r2.get("values", [])
         if vals:
             return vals[0]["id"]
+        # Fallback: search by name
+        r3, s3 = _api_get(session, base_url, "/product", {"name": name, "fields": "id"}, trace)
+        vals3 = r3.get("values", [])
+        if vals3:
+            return vals3[0]["id"]
     return None
 
 
@@ -1238,7 +1290,9 @@ def _create_supplier_if_needed(data, session, base_url, ctx, trace):
     sup_name = data.get("supplierName", "")
     existing = _find_supplier_by_name(ctx, sup_name)
     if existing:
+        log.info(f"Found existing supplier: {existing.get('name')} id={existing['id']}")
         return existing["id"]
+    log.info(f"Creating new supplier: {sup_name}")
 
     email = _val(data, "supplierEmail", "")
     if not email:
@@ -1288,13 +1342,28 @@ def handle_supplier_invoice(data, session, base_url, ctx):
     exp_acct_num = _val(data, "expenseAccount", "6500")
     exp_acct_id = _get_acct_id(ctx, exp_acct_num)
     if not exp_acct_id:
-        # Fetch it
         result, _ = _api_get(session, base_url, "/ledger/account",
                              {"number": exp_acct_num, "fields": "id"}, trace)
         vals = result.get("values", [])
         if vals:
             exp_acct_id = vals[0]["id"]
 
+    # Step 3: Parse amounts
+    amount_incl = _parse_amount(data.get("amountInclVat", 0))
+    amount_ex = _parse_amount(data.get("amountExVat", 0))
+    vat_pct = data.get("vatPercent", 25)
+
+    if amount_incl <= 0 and amount_ex > 0:
+        amount_incl = round(amount_ex * (1 + vat_pct / 100), 2)
+    elif amount_incl <= 0:
+        amount_incl = amount_ex  # fallback
+
+    inv_date = _val(data, "invoiceDate") or _today()
+    if not inv_date or len(inv_date) < 8:
+        inv_date = _today()
+    due_date = _val(data, "dueDate") or inv_date
+
+    # Step 4: Create voucher (incomingInvoice is always 403 in competition)
     acct_2400_id = _get_acct_id(ctx, "2400")
     if not acct_2400_id:
         result, _ = _api_get(session, base_url, "/ledger/account",
@@ -1307,21 +1376,9 @@ def handle_supplier_invoice(data, session, base_url, ctx):
         log.error("Missing ledger account IDs for supplier invoice voucher")
         return trace
 
-    # Step 3: Create voucher
-    amount_incl = _parse_amount(data.get("amountInclVat", 0))
-    amount_ex = _parse_amount(data.get("amountExVat", 0))
-    vat_pct = data.get("vatPercent", 25)
-
-    if amount_incl <= 0 and amount_ex > 0:
-        amount_incl = round(amount_ex * (1 + vat_pct / 100), 2)
-    elif amount_incl <= 0:
-        amount_incl = amount_ex  # fallback
-
     is_food = data.get("isFood", False)
-    # vatType:1 = ingoing 25%, vatType:11 = ingoing 15% (food)
     expense_vat_type = 11 if is_food else 1
 
-    inv_date = _val(data, "invoiceDate", _today())
     inv_num = _val(data, "invoiceNumber", "")
     sup_name = data.get("supplierName", "")
 
@@ -1597,6 +1654,38 @@ def handle_year_end(data, session, base_url, ctx):
             return vals[0]["id"]
         return None
 
+    # Pre-fetch accounts we'll need
+    get_acct("8700")  # Tax expense
+    get_acct("2920")  # Tax payable
+    get_acct("2050")  # Tax payable fallback
+    get_acct("8900")  # Result disposition
+    get_acct("2050")  # Equity / retained earnings
+    get_acct("2800")  # Equity fallback
+
+    # Step 0: GET ledger postings FIRST (before creating vouchers) for accurate calculation
+    year = voucher_date[:4]
+    result, status = _api_get(session, base_url, "/ledger/posting", {
+        "dateFrom": f"{year}-01-01",
+        "dateTo": f"{year}-12-31",
+        "fields": "id,amount,account(number,name)",
+        "count": "5000",
+    }, trace)
+
+    postings = result.get("values", [])
+    revenue = 0.0
+    expenses = 0.0
+    financial = 0.0  # 8xxx accounts (financial income/expense)
+    for p in postings:
+        acct = p.get("account", {})
+        acct_num = str(acct.get("number", ""))
+        amt = float(p.get("amount", 0))
+        if acct_num.startswith("3"):  # Revenue accounts
+            revenue += amt
+        elif acct_num.startswith(("4", "5", "6", "7")):  # Operating expense accounts
+            expenses += amt
+        elif acct_num.startswith("8") and not acct_num.startswith(("87", "89")):  # Financial income/expense (exclude tax 87xx and result disposition 89xx)
+            financial += amt
+
     total_depreciation = 0.0
 
     # Step 1: Depreciation vouchers (one per asset)
@@ -1681,15 +1770,15 @@ def handle_year_end(data, session, base_url, ctx):
     sal_accrual = data.get("salaryAccrual", {})
     sal_amt = _parse_amount(sal_accrual.get("amount", 0))
     if sal_amt > 0:
-        acct_5000 = get_acct("5000")
-        acct_2900 = get_acct("2900")
-        if acct_5000 and acct_2900:
+        sal_debit_acct = get_acct(sal_accrual.get("expenseAccount", "5000"))
+        sal_credit_acct = get_acct(sal_accrual.get("liabilityAccount", "2900"))
+        if sal_debit_acct and sal_credit_acct:
             v_body = {
                 "date": voucher_date,
                 "description": sal_accrual.get("description", "Lonnsavsetning"),
                 "postings": [
                     {
-                        "account": {"id": acct_5000},
+                        "account": {"id": sal_debit_acct},
                         "amountGross": sal_amt,
                         "amountGrossCurrency": sal_amt,
                         "date": voucher_date,
@@ -1697,7 +1786,7 @@ def handle_year_end(data, session, base_url, ctx):
                         "vatType": {"id": 0},
                     },
                     {
-                        "account": {"id": acct_2900},
+                        "account": {"id": sal_credit_acct},
                         "amountGross": -sal_amt,
                         "amountGrossCurrency": -sal_amt,
                         "date": voucher_date,
@@ -1709,33 +1798,16 @@ def handle_year_end(data, session, base_url, ctx):
             _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
 
     # Step 4: Tax calculation
-    # GET ledger postings for full year to calculate revenue - expenses
-    year = voucher_date[:4]
-    result, status = _api_get(session, base_url, "/ledger/posting", {
-        "dateFrom": f"{year}-01-01",
-        "dateTo": f"{year}-12-31",
-        "fields": "id,amount,account(number,name)",
-        "count": "5000",
-    }, trace)
-
-    postings = result.get("values", [])
-    revenue = 0.0
-    expenses = 0.0
-    for p in postings:
-        acct = p.get("account", {})
-        acct_num = str(acct.get("number", ""))
-        amt = float(p.get("amount", 0))
-        if acct_num.startswith("3"):  # Revenue accounts
-            revenue += amt
-        elif acct_num.startswith(("4", "5", "6", "7")):  # Expense accounts
-            expenses += amt
-
     # Revenue is typically negative (credit), expenses positive (debit)
-    # The GET results are BEFORE our new vouchers, so we need to ADD our new costs
-    # total_depreciation, total_prepaid, sal_amt are costs we just posted (not yet in ledger)
-    profit = -(revenue) - expenses - total_depreciation - total_prepaid - sal_amt
+    # financial includes 8xxx (financial income negative, financial expense positive)
+    # We fetched postings BEFORE creating vouchers, so we need to ADD our new costs
+    profit = -(revenue) - expenses - financial - total_depreciation - total_prepaid - sal_amt
     tax_rate = data.get("taxRate", 0.22)
     tax = round(max(0, profit * tax_rate), 2)
+
+    log.info(f"Year-end: revenue={revenue}, expenses={expenses}, financial={financial}, "
+             f"dep={total_depreciation}, prepaid={total_prepaid}, sal={sal_amt}, "
+             f"profit={profit}, tax={tax}")
 
     if tax > 0:
         acct_8700 = get_acct("8700")
@@ -1759,6 +1831,38 @@ def handle_year_end(data, session, base_url, ctx):
                         "account": {"id": acct_2920},
                         "amountGross": -tax,
                         "amountGrossCurrency": -tax,
+                        "date": voucher_date,
+                        "row": 2,
+                        "vatType": {"id": 0},
+                    },
+                ],
+            }
+            _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    # Step 5: Result disposition voucher (debit 8900, credit equity) — only if explicitly requested
+    net_profit = profit - tax
+    if net_profit > 0 and data.get("includeResultDisposition"):
+        acct_8900 = get_acct("8900")
+        acct_equity = get_acct(data.get("equityAccount", "2050"))
+        if not acct_equity:
+            acct_equity = get_acct("2800")
+        if acct_8900 and acct_equity:
+            v_body = {
+                "date": voucher_date,
+                "description": f"Resultatdisponering {year}",
+                "postings": [
+                    {
+                        "account": {"id": acct_8900},
+                        "amountGross": net_profit,
+                        "amountGrossCurrency": net_profit,
+                        "date": voucher_date,
+                        "row": 1,
+                        "vatType": {"id": 0},
+                    },
+                    {
+                        "account": {"id": acct_equity},
+                        "amountGross": -net_profit,
+                        "amountGrossCurrency": -net_profit,
                         "date": voucher_date,
                         "row": 2,
                         "vatType": {"id": 0},
@@ -1844,18 +1948,22 @@ def handle_cost_analysis(data, session, base_url, ctx):
             "firstName": emp.get("firstName", ""),
             "lastName": emp.get("lastName", ""),
             "email": emp.get("email", ""),
-            "dateOfBirth": emp.get("dateOfBirth", "1990-05-15"),
+            "dateOfBirth": emp.get("dateOfBirth") or "1990-05-15",
             "userType": "EXTENDED",
             "version": emp.get("version"),
         }
         _api_put(session, base_url, f"/employee/{emp_id}", trace, body=put_body)
 
-        # Step 5: Grant entitlements
+        # Step 5: Grant entitlements via POST /employee/entitlement
         company_id = ctx.get("_company_id")
         if company_id:
             for ent_id in (45, 10):
-                _api_put(session, base_url, "/employee/entitlement/:grantEntitlementsByTemplate",
-                         trace, params={"employeeId": str(emp_id), "template": "ALL_PRIVILEGES"})
+                ent_body = {
+                    "employee": {"id": emp_id},
+                    "entitlementId": ent_id,
+                    "customer": {"id": company_id},
+                }
+                _api_post(session, base_url, "/employee/entitlement", ent_body, trace)
 
         # Step 6: Create projects for top accounts
         for acct_num, acct_name, increase in top_accounts:
@@ -1867,14 +1975,14 @@ def handle_cost_analysis(data, session, base_url, ctx):
             }
             result, status = _api_post(session, base_url, "/project", proj_body, trace)
 
-            # Create activity
-            act_body = {
-                "name": acct_name if acct_name else f"Analyse {acct_num}",
-                "activityType": "GENERAL_ACTIVITY",
-                "isGeneral": True,
-                "isProjectActivity": False,
-            }
-            _api_post(session, base_url, "/activity", act_body, trace)
+            # Use pre-fetched activity if available, otherwise create one
+            pre_activities = ctx.get("activities", [])
+            if not pre_activities:
+                act_body = {
+                    "name": acct_name if acct_name else f"Analyse {acct_num}",
+                    "activityType": "GENERAL_ACTIVITY",
+                }
+                _api_post(session, base_url, "/activity", act_body, trace)
 
     return trace
 
@@ -1892,15 +2000,22 @@ def _ensure_employee_extended(emp, session, base_url, ctx, trace):
             "firstName": emp.get("firstName", ""),
             "lastName": emp.get("lastName", ""),
             "email": emp.get("email", ""),
-            "dateOfBirth": emp.get("dateOfBirth", "1990-05-15"),
+            "dateOfBirth": emp.get("dateOfBirth") or "1990-05-15",
             "userType": "EXTENDED",
             "version": emp.get("version"),
         }
         _api_put(session, base_url, f"/employee/{emp_id}", trace, body=put_body)
 
-    # Grant entitlements
-    _api_put(session, base_url, "/employee/entitlement/:grantEntitlementsByTemplate",
-             trace, params={"employeeId": str(emp_id), "template": "ALL_PRIVILEGES"})
+    # Grant entitlements via POST /employee/entitlement
+    company_id = ctx.get("_company_id")
+    if company_id:
+        for ent_id in (45, 10):
+            ent_body = {
+                "employee": {"id": emp_id},
+                "entitlementId": ent_id,
+                "customer": {"id": company_id},
+            }
+            _api_post(session, base_url, "/employee/entitlement", ent_body, trace)
 
     return emp_id
 
@@ -1969,11 +2084,14 @@ def handle_project_fixed(data, session, base_url, ctx):
     if cust_name:
         cust_id = _create_customer_if_needed(data, session, base_url, ctx, trace)
 
-    # Create project
+    # Create project with fixed price set directly in POST
+    fixed_price = _parse_amount(data.get("fixedPrice", 0))
     proj_body = {
         "name": data.get("projectName", "Project"),
         "startDate": _val(data, "startDate", _today()),
         "projectManager": {"id": emp_id},
+        "isFixedPrice": True,
+        "fixedprice": fixed_price,
     }
     if cust_id:
         proj_body["customer"] = {"id": cust_id}
@@ -1983,35 +2101,9 @@ def handle_project_fixed(data, session, base_url, ctx):
         return trace
 
     proj_id = result.get("value", {}).get("id")
-    proj_version = result.get("value", {}).get("version")
-    proj_number = result.get("value", {}).get("number")
 
     if not proj_id:
         return trace
-
-    # GET project to get version
-    r2, _ = _api_get(session, base_url, f"/project/{proj_id}", {"fields": "id,version,number"}, trace)
-    if r2.get("value"):
-        proj_version = r2["value"].get("version", proj_version)
-        proj_number = r2["value"].get("number", proj_number)
-
-    # PUT to set fixed price
-    fixed_price = _parse_amount(data.get("fixedPrice", 0))
-    put_body = {
-        "id": proj_id,
-        "name": data.get("projectName", "Project"),
-        "startDate": _val(data, "startDate", _today()),
-        "projectManager": {"id": emp_id},
-        "isFixedPrice": True,
-        "fixedprice": fixed_price,
-        "version": proj_version,
-    }
-    if proj_number:
-        put_body["number"] = str(proj_number)
-    if cust_id:
-        put_body["customer"] = {"id": cust_id}
-
-    _api_put(session, base_url, f"/project/{proj_id}", trace, body=put_body)
 
     # Create partial invoice if requested
     pct = data.get("partialInvoicePercent", 0)
@@ -2075,17 +2167,23 @@ def handle_timesheet(data, session, base_url, ctx):
     if not proj_id:
         return trace
 
-    # Find activity
+    # Create a project-compatible activity (isProjectActivity=True)
     activity_id = None
-    activities = ctx.get("activities", [])
-    if activities:
-        activity_id = activities[0]["id"]
-    else:
-        # Create activity
-        act_body = {"name": _val(data, "description", "Arbeid"), "activityType": "GENERAL_ACTIVITY", "isGeneral": True}
-        r, s = _api_post(session, base_url, "/activity", act_body, trace)
-        if s == 201:
-            activity_id = r.get("value", {}).get("id")
+    act_body = {"name": _val(data, "description", "Arbeid"), "activityType": "PROJECT_GENERAL_ACTIVITY"}
+    r, s = _api_post(session, base_url, "/activity", act_body, trace)
+    if s == 201:
+        activity_id = r.get("value", {}).get("id")
+    if not activity_id:
+        # Fallback: try general activity
+        act_body2 = {"name": _val(data, "description", "Arbeid"), "activityType": "GENERAL_ACTIVITY"}
+        r2, s2 = _api_post(session, base_url, "/activity", act_body2, trace)
+        if s2 == 201:
+            activity_id = r2.get("value", {}).get("id")
+    if not activity_id:
+        # Last fallback: use pre-fetched activity
+        activities = ctx.get("activities", [])
+        if activities:
+            activity_id = activities[0]["id"]
 
     if not activity_id:
         return trace
@@ -2122,8 +2220,1066 @@ def handle_timesheet(data, session, base_url, ctx):
 
 
 # ═══════════════════════════════════════════════════════════
+# HANDLER: TRAVEL EXPENSE
+# ═══════════════════════════════════════════════════════════
+
+def handle_travel_expense(data, session, base_url, ctx):
+    trace = []
+    today = _today()
+
+    # Step 1: Find employee
+    email = data.get("employeeEmail", "")
+    emp = _find_employee_by_email(ctx, email)
+    if not emp and ctx.get("employees"):
+        emp = ctx["employees"][0]
+    if not emp:
+        log.error("No employee found for travel expense")
+        return trace
+
+    emp_id = emp["id"]
+
+    # Ensure employee is EXTENDED + has employment
+    _ensure_employee_extended(emp, session, base_url, ctx, trace)
+
+    has_employment = bool(emp.get("_employments"))
+    if not has_employment:
+        div_id = _ensure_division(session, base_url, ctx, trace)
+        if div_id:
+            empl_body = {
+                "employee": {"id": emp_id},
+                "startDate": _val(data, "departureDate", today),
+                "division": {"id": div_id},
+                "isMainEmployer": True,
+                "taxDeductionCode": "loennFraHovedarbeidsgiver",
+            }
+            result, status = _api_post(session, base_url, "/employee/employment", empl_body, trace)
+            if status == 201:
+                empl_id = result.get("value", {}).get("id")
+                if empl_id:
+                    det_body = {
+                        "employment": {"id": empl_id},
+                        "date": _val(data, "departureDate", today),
+                        "employmentType": "ORDINARY",
+                        "employmentForm": "PERMANENT",
+                        "remunerationType": "MONTHLY_WAGE",
+                        "workingHoursScheme": "NOT_SHIFT",
+                        "percentageOfFullTimeEquivalent": 100.0,
+                    }
+                    _api_post(session, base_url, "/employee/employment/details", det_body, trace)
+
+    # Step 2: POST /travelExpense
+    dep_date = _val(data, "departureDate", today)
+    ret_date = _val(data, "returnDate", dep_date)
+    travel_body = {
+        "employee": {"id": emp_id},
+        "title": _val(data, "title", "Reiseregning"),
+        "travelDetails": {
+            "departureDate": dep_date,
+            "returnDate": ret_date,
+            "departureFrom": _val(data, "departureFrom", ""),
+            "destination": _val(data, "destination", ""),
+            "purpose": _val(data, "purpose", _val(data, "title", "Reise")),
+        },
+    }
+    result, status = _api_post(session, base_url, "/travelExpense", travel_body, trace)
+    if status != 201:
+        return trace
+
+    travel_id = result.get("value", {}).get("id")
+    if not travel_id:
+        return trace
+
+    # Step 3: Per diem compensation if overnight stay
+    if data.get("overnightStay"):
+        rate_cat_id = ctx.get("per_diem_overnight_id")
+        if not rate_cat_id:
+            rate_cat_id = ctx.get("per_diem_day_id")
+        if rate_cat_id:
+            # Calculate days from departure to return
+            try:
+                from datetime import datetime as _dt
+                _dep_dt = _dt.strptime(dep_date, "%Y-%m-%d")
+                _ret_dt = _dt.strptime(ret_date, "%Y-%m-%d")
+                per_diem_days = (_ret_dt - _dep_dt).days + 1
+            except Exception:
+                per_diem_days = 1
+            per_diem_rate = _parse_amount(data.get("perDiemRate", 800))
+            pd_body = {
+                "travelExpense": {"id": travel_id},
+                "rateCategory": {"id": rate_cat_id},
+                "count": per_diem_days,
+                "rate": per_diem_rate,
+                "overnightAccommodation": "HOTEL",
+                "location": _val(data, "destination", "Norge"),
+            }
+            _api_post(session, base_url, "/travelExpense/perDiemCompensation", pd_body, trace)
+
+    # Step 4: Costs
+    pt_id = _get_payment_type_id(ctx)
+    for cost in data.get("costs", []):
+        amount = _parse_amount(cost.get("amount", 0))
+        if amount <= 0:
+            continue
+
+        # Match cost category from prefetched context
+        cc_id = None
+        cat = cost.get("category", "other").lower()
+        for cc in ctx.get("cost_categories", []):
+            desc = str(cc.get("description", "")).lower()
+            if cat in desc or desc in cat:
+                cc_id = cc["id"]
+                break
+        if not cc_id and ctx.get("cost_categories"):
+            cc_id = ctx["cost_categories"][0]["id"]
+
+        cost_body = {
+            "travelExpense": {"id": travel_id},
+            "description": cost.get("description", cost.get("category", "Utgift")),
+            "amountCurrencyIncVat": amount,
+            "currency": {"id": 1},
+            "date": cost.get("date", dep_date),
+            "paymentType": {"id": pt_id} if pt_id else {"id": 1},
+        }
+        if cc_id:
+            cost_body["costCategory"] = {"id": cc_id}
+        _api_post(session, base_url, "/travelExpense/cost", cost_body, trace)
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: DELETE TRAVEL EXPENSE
+# ═══════════════════════════════════════════════════════════
+
+def handle_delete_travel(data, session, base_url, ctx):
+    trace = []
+
+    # Step 1: GET travel expenses
+    result, status = _api_get(session, base_url, "/travelExpense", {
+        "fields": "id,title,status,employee(email)",
+        "count": "100",
+    }, trace)
+
+    travels = result.get("values", [])
+    if not travels:
+        log.error("No travel expenses found")
+        return trace
+
+    # Step 2: Find the right one
+    target = None
+    travel_id_hint = data.get("travelExpenseId", 0)
+    title_hint = _val(data, "travelExpenseTitle", "")
+    email_hint = _val(data, "employeeEmail", "")
+
+    if travel_id_hint:
+        for t in travels:
+            if t.get("id") == travel_id_hint:
+                target = t
+                break
+
+    if not target and title_hint:
+        title_lower = title_hint.lower()
+        for t in travels:
+            if title_lower in str(t.get("title", "")).lower():
+                target = t
+                break
+
+    if not target and email_hint:
+        email_lower = email_hint.lower()
+        for t in travels:
+            e = t.get("employee", {})
+            if email_lower in str(e.get("email", "")).lower():
+                target = t
+                break
+
+    if not target:
+        target = travels[-1]
+
+    travel_id = target["id"]
+    travel_status = str(target.get("status", "")).upper()
+
+    # Step 3: Unapprove if APPROVED
+    if travel_status == "APPROVED":
+        _api_put(session, base_url, f"/travelExpense/{travel_id}/:unapprove", trace)
+
+    # Step 4: DELETE
+    _api_delete(session, base_url, f"/travelExpense/{travel_id}", trace)
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: BANK RECONCILIATION
+# ═══════════════════════════════════════════════════════════
+
+def handle_bank_recon(data, session, base_url, ctx):
+    trace = []
+    today = _today()
+
+    transactions = data.get("transactions", [])
+    if not transactions:
+        log.error("No transactions to reconcile")
+        return trace
+
+    date_from = _val(data, "dateFrom", "2020-01-01")
+    date_to = _val(data, "dateTo", "2027-01-01")
+
+    # Step 1: GET invoices
+    result, status = _api_get(session, base_url, "/invoice", {
+        "invoiceDateFrom": date_from,
+        "invoiceDateTo": date_to,
+        "fields": "id,invoiceNumber,amount,amountOutstanding,customer",
+        "count": "500",
+    }, trace)
+    invoices = result.get("values", [])
+
+    pt_id = _get_payment_type_id(ctx)
+
+    def get_acct(num):
+        aid = _get_acct_id(ctx, str(num))
+        if aid:
+            return aid
+        r, _ = _api_get(session, base_url, "/ledger/account", {"number": str(num), "fields": "id"}, trace)
+        vals = r.get("values", [])
+        if vals:
+            if "ledger_accounts" not in ctx:
+                ctx["ledger_accounts"] = {}
+            ctx["ledger_accounts"][str(num)] = vals[0]["id"]
+            return vals[0]["id"]
+        return None
+
+    for txn in transactions:
+        amount = _parse_amount(txn.get("amount", 0))
+        txn_date = txn.get("date", today)
+        reference = str(txn.get("reference", ""))
+        description = txn.get("description", "")
+
+        if amount > 0:
+            # Incoming payment -> match to invoice
+            matched = None
+            if reference:
+                for inv in invoices:
+                    if str(inv.get("invoiceNumber", "")) == reference:
+                        matched = inv
+                        break
+            if not matched:
+                for inv in invoices:
+                    outstanding = float(inv.get("amountOutstanding", 0))
+                    if outstanding > 0 and abs(outstanding - amount) < 1.0:
+                        matched = inv
+                        break
+            if matched:
+                inv_id = matched["id"]
+                params = {
+                    "paymentDate": txn_date,
+                    "paymentTypeId": str(pt_id) if pt_id else "1",
+                    "paidAmount": str(amount),
+                }
+                _api_put(session, base_url, f"/invoice/{inv_id}/:payment", trace, params=params)
+            else:
+                acct_1920 = get_acct("1920")
+                acct_1500 = get_acct("1500")
+                # Account 1500 requires customer on posting — fallback to 1920 if no customer
+                customer_id = None
+                # Try to find a customer from nearby invoice matches
+                for inv in invoices:
+                    cust = inv.get("customer")
+                    if cust and cust.get("id"):
+                        customer_id = cust["id"]
+                        break
+                if acct_1920:
+                    if acct_1500 and customer_id:
+                        counter_posting = {"account": {"id": acct_1500}, "amountGross": -amount, "amountGrossCurrency": -amount, "date": txn_date, "row": 2, "vatType": {"id": 0}, "customer": {"id": customer_id}}
+                    else:
+                        # No customer available — use 1920 for both sides (bank-to-bank)
+                        counter_posting = {"account": {"id": acct_1920}, "amountGross": -amount, "amountGrossCurrency": -amount, "date": txn_date, "row": 2, "vatType": {"id": 0}}
+                    v_body = {
+                        "date": txn_date,
+                        "description": description or f"Innbetaling {reference}",
+                        "postings": [
+                            {"account": {"id": acct_1920}, "amountGross": amount, "amountGrossCurrency": amount, "date": txn_date, "row": 1, "vatType": {"id": 0}},
+                            counter_posting,
+                        ],
+                    }
+                    _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+        elif amount < 0:
+            # Outgoing payment -> voucher: debit 2400, credit 1920
+            abs_amount = abs(amount)
+            acct_2400 = get_acct("2400")
+            acct_1920 = get_acct("1920")
+            # Account 2400 requires supplier on posting — find or create one
+            supplier_id = None
+            supplier_name = description or reference or "Ukjent leverandor"
+            # Search for existing supplier
+            r_sup, _ = _api_get(session, base_url, "/supplier", {"name": supplier_name, "fields": "id,name", "count": "1"}, trace)
+            sup_vals = r_sup.get("values", [])
+            if sup_vals:
+                supplier_id = sup_vals[0]["id"]
+            else:
+                # Create supplier
+                sup_body = {"name": supplier_name}
+                r_sup2, s_sup = _api_post(session, base_url, "/supplier", sup_body, trace)
+                if s_sup == 201:
+                    supplier_id = r_sup2.get("value", {}).get("id")
+            if acct_1920:
+                if acct_2400 and supplier_id:
+                    debit_posting = {"account": {"id": acct_2400}, "amountGross": abs_amount, "amountGrossCurrency": abs_amount, "date": txn_date, "row": 1, "vatType": {"id": 0}, "supplier": {"id": supplier_id}}
+                else:
+                    # No supplier available — use 1920 (bank-to-bank)
+                    debit_posting = {"account": {"id": acct_1920}, "amountGross": abs_amount, "amountGrossCurrency": abs_amount, "date": txn_date, "row": 1, "vatType": {"id": 0}}
+                v_body = {
+                    "date": txn_date,
+                    "description": description or f"Utbetaling {reference}",
+                    "postings": [
+                        debit_posting,
+                        {"account": {"id": acct_1920}, "amountGross": -abs_amount, "amountGrossCurrency": -abs_amount, "date": txn_date, "row": 2, "vatType": {"id": 0}},
+                    ],
+                }
+                _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: PROJECT LIFECYCLE
+# ═══════════════════════════════════════════════════════════
+
+def handle_project_lifecycle(data, session, base_url, ctx):
+    trace = []
+    today = _today()
+
+    # Step 1: Setup employees
+    emp_objects = []
+    for emp_data in data.get("employees", []):
+        email = emp_data.get("email", "")
+        emp = _find_employee_by_email(ctx, email)
+        if not emp and ctx.get("employees"):
+            emp = ctx["employees"][0]
+        if emp:
+            _ensure_employee_extended(emp, session, base_url, ctx, trace)
+            has_employment = bool(emp.get("_employments"))
+            if not has_employment:
+                div_id = _ensure_division(session, base_url, ctx, trace)
+                if div_id:
+                    empl_body = {
+                        "employee": {"id": emp["id"]},
+                        "startDate": today,
+                        "division": {"id": div_id},
+                        "isMainEmployer": True,
+                        "taxDeductionCode": "loennFraHovedarbeidsgiver",
+                    }
+                    result, status = _api_post(session, base_url, "/employee/employment", empl_body, trace)
+                    if status == 201:
+                        empl_id = result.get("value", {}).get("id")
+                        if empl_id:
+                            det_body = {
+                                "employment": {"id": empl_id},
+                                "date": today,
+                                "employmentType": "ORDINARY",
+                                "employmentForm": "PERMANENT",
+                                "remunerationType": "MONTHLY_WAGE",
+                                "workingHoursScheme": "NOT_SHIFT",
+                                "percentageOfFullTimeEquivalent": 100.0,
+                            }
+                            _api_post(session, base_url, "/employee/employment/details", det_body, trace)
+            emp_objects.append({"emp": emp, "data": emp_data})
+
+    if not emp_objects:
+        log.error("No employees found for project lifecycle")
+        return trace
+
+    # Step 2: Create/find customer
+    cust_id = _create_customer_if_needed(data, session, base_url, ctx, trace)
+
+    # Step 3: Create project
+    pm_id = emp_objects[0]["emp"]["id"]
+    proj_body = {
+        "name": data.get("projectName", "Project"),
+        "startDate": today,
+        "projectManager": {"id": pm_id},
+    }
+    if cust_id:
+        proj_body["customer"] = {"id": cust_id}
+
+    result, status = _api_post(session, base_url, "/project", proj_body, trace)
+    proj_id = None
+    if status == 201:
+        proj_id = result.get("value", {}).get("id")
+
+    if not proj_id:
+        return trace
+
+    # Step 4: Find/create activity
+    activity_id = None
+    activities = ctx.get("activities", [])
+    if activities:
+        activity_id = activities[0]["id"]
+    else:
+        act_body = {"name": "Prosjektarbeid", "activityType": "GENERAL_ACTIVITY"}
+        r, s = _api_post(session, base_url, "/activity", act_body, trace)
+        if s == 201:
+            activity_id = r.get("value", {}).get("id")
+
+    # Step 5: Timesheet entries
+    if activity_id:
+        for emp_obj in emp_objects:
+            hours = _parse_amount(emp_obj["data"].get("hours", 0))
+            entry_date = _val(emp_obj["data"], "date", today)
+            if hours > 0:
+                ts_body = {
+                    "project": {"id": proj_id},
+                    "activity": {"id": activity_id},
+                    "employee": {"id": emp_obj["emp"]["id"]},
+                    "date": entry_date,
+                    "hours": hours,
+                }
+                _api_post(session, base_url, "/timesheet/entry", ts_body, trace)
+
+    # Step 6: Supplier cost vouchers
+    def get_acct(num):
+        aid = _get_acct_id(ctx, str(num))
+        if aid:
+            return aid
+        r, _ = _api_get(session, base_url, "/ledger/account", {"number": str(num), "fields": "id"}, trace)
+        vals = r.get("values", [])
+        if vals:
+            if "ledger_accounts" not in ctx:
+                ctx["ledger_accounts"] = {}
+            ctx["ledger_accounts"][str(num)] = vals[0]["id"]
+            return vals[0]["id"]
+        return None
+
+    for sc in data.get("supplierCosts", []):
+        amount = _parse_amount(sc.get("amount", 0))
+        if amount <= 0:
+            continue
+        exp_acct_num = sc.get("expenseAccount", "6500")
+        exp_acct_id = get_acct(exp_acct_num)
+        acct_2400 = get_acct("2400")
+        vat_pct = sc.get("vatPercent", 25)
+        expense_vat_type = {25: 1, 15: 11, 0: 0}.get(vat_pct, 1)
+
+        if exp_acct_id and acct_2400:
+            v_body = {
+                "date": today,
+                "description": sc.get("description", f"Leverandorkostnad {sc.get('supplierName', '')}"),
+                "postings": [
+                    {"account": {"id": exp_acct_id}, "amountGross": amount, "amountGrossCurrency": amount, "date": today, "row": 1, "vatType": {"id": expense_vat_type}},
+                    {"account": {"id": acct_2400}, "amountGross": -amount, "amountGrossCurrency": -amount, "date": today, "row": 2, "vatType": {"id": 0}},
+                ],
+            }
+            _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    # Step 7: Customer invoice
+    if cust_id and data.get("invoiceProducts"):
+        products_info = []
+        for i, p in enumerate(data.get("invoiceProducts", [])):
+            price_ex = _parse_amount(p.get("priceExVat", 0))
+            vat_pct = p.get("vatPercent", 25)
+            prod_id = _create_product(
+                p.get("name", f"Product {i+1}"),
+                p.get("number", str(i+1)),
+                price_ex, vat_pct, session, base_url, trace,
+            )
+            if prod_id:
+                products_info.append({
+                    "product_id": prod_id,
+                    "price_ex_vat": price_ex,
+                    "vat_pct": vat_pct,
+                    "quantity": p.get("quantity", 1),
+                })
+
+        if products_info:
+            _create_invoice_flow(cust_id, products_info, session, base_url, ctx, trace)
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: FX INVOICE (FOREIGN CURRENCY)
+# ═══════════════════════════════════════════════════════════
+
+def handle_fx_invoice(data, session, base_url, ctx):
+    trace = []
+    today = _today()
+
+    # Step 1: Find/create customer
+    cust_id = _create_customer_if_needed(data, session, base_url, ctx, trace)
+
+    # Step 2: Find the invoice
+    result, status = _api_get(session, base_url, "/invoice", {
+        "invoiceDateFrom": "2020-01-01",
+        "invoiceDateTo": "2027-01-01",
+        "fields": "id,invoiceNumber,amount,amountOutstanding,customer",
+        "count": "200",
+    }, trace)
+
+    invoices = result.get("values", [])
+    target = None
+    inv_num = _val(data, "invoiceNumber", "")
+    cust_name = _val(data, "customerName", "")
+    amount = _parse_amount(data.get("invoiceAmount", 0))
+
+    for inv in invoices:
+        if inv_num and str(inv.get("invoiceNumber")) == str(inv_num):
+            target = inv
+            break
+    if not target and cust_name:
+        cust_lower = cust_name.lower()
+        for inv in invoices:
+            c = inv.get("customer", {})
+            if cust_lower in str(c.get("name", "")).lower():
+                target = inv
+                break
+    if not target and invoices:
+        for inv in invoices:
+            if float(inv.get("amountOutstanding", 0)) > 0:
+                target = inv
+                break
+
+    # Step 3: Pay the invoice
+    if target:
+        inv_id = target["id"]
+        pay_amount = float(target.get("amountOutstanding", target.get("amount", 0)))
+        pt_id = _get_payment_type_id(ctx)
+        pay_date = _val(data, "paymentDate", today)
+        params = {
+            "paymentDate": pay_date,
+            "paymentTypeId": str(pt_id) if pt_id else "1",
+            "paidAmount": str(pay_amount),
+        }
+        _api_put(session, base_url, f"/invoice/{inv_id}/:payment", trace, params=params)
+
+    # Step 4: FX difference voucher
+    old_rate = _parse_amount(data.get("oldRate", 0))
+    new_rate = _parse_amount(data.get("newRate", 0))
+    if old_rate > 0 and new_rate > 0 and amount > 0:
+        amount_nok_old = round(amount * old_rate, 2)
+        amount_nok_new = round(amount * new_rate, 2)
+        fx_diff = round(amount_nok_new - amount_nok_old, 2)
+
+        def get_acct(num):
+            aid = _get_acct_id(ctx, str(num))
+            if aid:
+                return aid
+            r, _ = _api_get(session, base_url, "/ledger/account", {"number": str(num), "fields": "id"}, trace)
+            vals = r.get("values", [])
+            if vals:
+                if "ledger_accounts" not in ctx:
+                    ctx["ledger_accounts"] = {}
+                ctx["ledger_accounts"][str(num)] = vals[0]["id"]
+                return vals[0]["id"]
+            return None
+
+        if fx_diff != 0:
+            acct_1500 = get_acct("1500")
+            pay_date = _val(data, "paymentDate", today)
+
+            if fx_diff > 0:
+                # FX gain: debit 1500, credit 8060
+                acct_fx = get_acct("8060")
+                if acct_1500 and acct_fx:
+                    v_body = {
+                        "date": pay_date,
+                        "description": f"Valutagevinst {data.get('currency', 'FX')}",
+                        "postings": [
+                            {"account": {"id": acct_1500}, "amountGross": fx_diff, "amountGrossCurrency": fx_diff, "date": pay_date, "row": 1, "vatType": {"id": 0}, **({"customer": {"id": cust_id}} if cust_id else {})},
+                            {"account": {"id": acct_fx}, "amountGross": -fx_diff, "amountGrossCurrency": -fx_diff, "date": pay_date, "row": 2, "vatType": {"id": 0}},
+                        ],
+                    }
+                    _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+            else:
+                # FX loss: debit 8160, credit 1500
+                acct_fx = get_acct("8160")
+                abs_diff = abs(fx_diff)
+                if acct_1500 and acct_fx:
+                    v_body = {
+                        "date": pay_date,
+                        "description": f"Valutatap {data.get('currency', 'FX')}",
+                        "postings": [
+                            {"account": {"id": acct_fx}, "amountGross": abs_diff, "amountGrossCurrency": abs_diff, "date": pay_date, "row": 1, "vatType": {"id": 0}},
+                            {"account": {"id": acct_1500}, "amountGross": -abs_diff, "amountGrossCurrency": -abs_diff, "date": pay_date, "row": 2, "vatType": {"id": 0}, **({"customer": {"id": cust_id}} if cust_id else {})},
+                        ],
+                    }
+                    _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: REMINDER FEE
+# ═══════════════════════════════════════════════════════════
+
+def handle_reminder_fee(data, session, base_url, ctx):
+    trace = []
+    today = _today()
+
+    # Step 1: Find overdue invoice
+    result, status = _api_get(session, base_url, "/invoice", {
+        "invoiceDateFrom": "2020-01-01",
+        "invoiceDateTo": "2027-01-01",
+        "fields": "id,invoiceNumber,amount,amountOutstanding,customer",
+        "count": "200",
+    }, trace)
+
+    invoices = result.get("values", [])
+    cust_name = _val(data, "customerName", "")
+    inv_num = _val(data, "invoiceNumber", "")
+    target = None
+
+    for inv in invoices:
+        if inv_num and str(inv.get("invoiceNumber")) == str(inv_num):
+            target = inv
+            break
+    if not target and cust_name:
+        cust_lower = cust_name.lower()
+        for inv in invoices:
+            c = inv.get("customer", {})
+            outstanding = float(inv.get("amountOutstanding", 0))
+            if cust_lower in str(c.get("name", "")).lower() and outstanding > 0:
+                target = inv
+                break
+    if not target:
+        for inv in invoices:
+            if float(inv.get("amountOutstanding", 0)) > 0:
+                target = inv
+                break
+
+    # Step 2: Reminder voucher: debit 1500, credit 3400
+    reminder_fee = _parse_amount(data.get("reminderFee", 35))
+    reminder_date = _val(data, "reminderDate", today)
+
+    def get_acct(num):
+        aid = _get_acct_id(ctx, str(num))
+        if aid:
+            return aid
+        r, _ = _api_get(session, base_url, "/ledger/account", {"number": str(num), "fields": "id"}, trace)
+        vals = r.get("values", [])
+        if vals:
+            if "ledger_accounts" not in ctx:
+                ctx["ledger_accounts"] = {}
+            ctx["ledger_accounts"][str(num)] = vals[0]["id"]
+            return vals[0]["id"]
+        return None
+
+    acct_1500 = get_acct("1500")
+    acct_3400 = get_acct("3400")
+    reminder_cust_id = target.get("customer", {}).get("id") if target else None
+    if not reminder_cust_id:
+        reminder_cust_id = _create_customer_if_needed(data, session, base_url, ctx, trace)
+    if acct_1500 and acct_3400:
+        posting_1500 = {"account": {"id": acct_1500}, "amountGross": reminder_fee, "amountGrossCurrency": reminder_fee, "date": reminder_date, "row": 1, "vatType": {"id": 0}}
+        if reminder_cust_id:
+            posting_1500["customer"] = {"id": reminder_cust_id}
+        v_body = {
+            "date": reminder_date,
+            "description": f"Purregebyr {cust_name}",
+            "postings": [
+                posting_1500,
+                {"account": {"id": acct_3400}, "amountGross": -reminder_fee, "amountGrossCurrency": -reminder_fee, "date": reminder_date, "row": 2, "vatType": {"id": 0}},
+            ],
+        }
+        _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    # Step 3: Create reminder invoice
+    cust_id = None
+    if target:
+        cust_id = target.get("customer", {}).get("id")
+    if not cust_id:
+        cust_id = _create_customer_if_needed(data, session, base_url, ctx, trace)
+
+    if cust_id:
+        prod_id = _create_product("Purregebyr", "PURRE-1", reminder_fee, 0, session, base_url, trace)
+        if prod_id:
+            _create_invoice_flow(
+                cust_id,
+                [{"product_id": prod_id, "price_ex_vat": reminder_fee, "vat_pct": 0, "quantity": 1}],
+                session, base_url, ctx, trace,
+                invoice_date=reminder_date,
+                due_date=_due(14),
+            )
+
+    # Step 4: Partial payment on overdue invoice if specified
+    partial = _parse_amount(data.get("partialPaymentAmount", 0))
+    if partial > 0 and target:
+        pt_id = _get_payment_type_id(ctx)
+        params = {
+            "paymentDate": reminder_date,
+            "paymentTypeId": str(pt_id) if pt_id else "1",
+            "paidAmount": str(partial),
+        }
+        _api_put(session, base_url, f"/invoice/{target['id']}/:payment", trace, params=params)
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: MONTH END
+# ═══════════════════════════════════════════════════════════
+
+def handle_month_end(data, session, base_url, ctx):
+    trace = []
+    voucher_date = _val(data, "voucherDate", _today())
+
+    def get_acct(num):
+        aid = _get_acct_id(ctx, str(num))
+        if aid:
+            return aid
+        r, _ = _api_get(session, base_url, "/ledger/account", {"number": str(num), "fields": "id"}, trace)
+        vals = r.get("values", [])
+        if vals:
+            if "ledger_accounts" not in ctx:
+                ctx["ledger_accounts"] = {}
+            ctx["ledger_accounts"][str(num)] = vals[0]["id"]
+            return vals[0]["id"]
+        return None
+
+    # Step 1: Monthly depreciation per asset
+    for asset in data.get("assets", []):
+        annual_dep = _parse_amount(asset.get("annualDepreciation", 0))
+        monthly_dep = round(annual_dep / 12, 2)
+        if monthly_dep <= 0:
+            continue
+
+        dep_acct = get_acct(asset.get("depreciationAccountNumber", "6010"))
+        accum_acct = get_acct(asset.get("accumulatedDepAccountNumber", "1209"))
+
+        if dep_acct and accum_acct:
+            v_body = {
+                "date": voucher_date,
+                "description": f"Mnd avskrivning {asset.get('name', '')}".strip(),
+                "postings": [
+                    {"account": {"id": dep_acct}, "amountGross": monthly_dep, "amountGrossCurrency": monthly_dep, "date": voucher_date, "row": 1, "vatType": {"id": 0}},
+                    {"account": {"id": accum_acct}, "amountGross": -monthly_dep, "amountGrossCurrency": -monthly_dep, "date": voucher_date, "row": 2, "vatType": {"id": 0}},
+                ],
+            }
+            _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    # Step 2: Prepaid expense accruals
+    for prepaid in data.get("prepaidExpenses", []):
+        total = _parse_amount(prepaid.get("totalAmount", 0))
+        months = prepaid.get("months", 12)
+        if months <= 0:
+            months = 12
+        monthly_amt = round(total / months, 2)
+        if monthly_amt <= 0:
+            continue
+
+        exp_acct = get_acct(prepaid.get("expenseAccount", "6300"))
+        prepaid_acct = get_acct(prepaid.get("prepaidAccount", "1710"))
+
+        if exp_acct and prepaid_acct:
+            v_body = {
+                "date": voucher_date,
+                "description": f"Periodisering {prepaid.get('description', '')}".strip(),
+                "postings": [
+                    {"account": {"id": exp_acct}, "amountGross": monthly_amt, "amountGrossCurrency": monthly_amt, "date": voucher_date, "row": 1, "vatType": {"id": 0}},
+                    {"account": {"id": prepaid_acct}, "amountGross": -monthly_amt, "amountGrossCurrency": -monthly_amt, "date": voucher_date, "row": 2, "vatType": {"id": 0}},
+                ],
+            }
+            _api_post(session, base_url, "/ledger/voucher", v_body, trace, params={"sendToLedger": "true"})
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: EMPLOYEE FROM PDF
+# ═══════════════════════════════════════════════════════════
+
+def handle_employee_pdf(data, session, base_url, ctx):
+    trace = []
+    today = _today()
+
+    email = data.get("email", "")
+    # Fallback: generate email if missing
+    if not email:
+        first = data.get("firstName", "ukjent").strip().lower().replace(" ", "")
+        last = data.get("lastName", "ukjent").strip().lower().replace(" ", "")
+        email = f"{first}.{last}@example.org"
+    existing = _find_employee_by_email(ctx, email)
+
+    # Step 1: Create or update employee
+    if existing:
+        emp_id = existing["id"]
+        user_type = _val(data, "userType", "STANDARD")
+        if user_type.upper() == "ADMINISTRATOR":
+            user_type = "EXTENDED"
+        dept_id = ctx.get("default_department_id")
+        put_body = {
+            "id": emp_id,
+            "firstName": data.get("firstName", existing.get("firstName", "")),
+            "lastName": data.get("lastName", existing.get("lastName", "")),
+            "email": email,
+            "dateOfBirth": _val(data, "dateOfBirth", existing.get("dateOfBirth", "1990-05-15")),
+            "userType": user_type,
+            "version": existing.get("version"),
+        }
+        if dept_id:
+            put_body["department"] = {"id": dept_id}
+        nid = _val(data, "nationalIdentityNumber")
+        if nid:
+            put_body["nationalIdentityNumber"] = nid
+        emp_num = _val(data, "employeeNumber")
+        if emp_num:
+            put_body["employeeNumber"] = str(emp_num)
+        _api_put(session, base_url, f"/employee/{emp_id}", trace, body=put_body)
+    else:
+        dob = _val(data, "dateOfBirth", "1990-05-15")
+        user_type = _val(data, "userType", "STANDARD")
+        if user_type.upper() == "ADMINISTRATOR":
+            user_type = "EXTENDED"
+        dept_id = ctx.get("default_department_id")
+        post_body = {
+            "firstName": data.get("firstName", ""),
+            "lastName": data.get("lastName", ""),
+            "email": email,
+            "dateOfBirth": dob,
+            "userType": user_type,
+        }
+        if dept_id:
+            post_body["department"] = {"id": dept_id}
+        nid = _val(data, "nationalIdentityNumber")
+        if nid:
+            post_body["nationalIdentityNumber"] = nid
+        emp_num = _val(data, "employeeNumber")
+        if emp_num:
+            post_body["employeeNumber"] = str(emp_num)
+
+        result, status = _api_post(session, base_url, "/employee", post_body, trace)
+        if status != 201:
+            return trace
+        emp_id = result.get("value", {}).get("id")
+        if not emp_id:
+            return trace
+
+    # Step 2: Ensure division + employment + details
+    div_id = _ensure_division(session, base_url, ctx, trace)
+    start_date = _val(data, "startDate", today)
+    pct = data.get("percentageOfFullTime", 100.0)
+
+    if div_id:
+        has_employment = existing and bool(existing.get("_employments"))
+        if not has_employment:
+            empl_body = {
+                "employee": {"id": emp_id},
+                "startDate": start_date,
+                "division": {"id": div_id},
+                "isMainEmployer": True,
+                "taxDeductionCode": "loennFraHovedarbeidsgiver",
+            }
+            result, status = _api_post(session, base_url, "/employee/employment", empl_body, trace)
+            if status == 201:
+                empl_id = result.get("value", {}).get("id")
+                if empl_id:
+                    det_body = {
+                        "employment": {"id": empl_id},
+                        "date": start_date,
+                        "employmentType": "ORDINARY",
+                        "employmentForm": "PERMANENT",
+                        "remunerationType": "MONTHLY_WAGE",
+                        "workingHoursScheme": "NOT_SHIFT",
+                        "percentageOfFullTimeEquivalent": float(pct),
+                    }
+                    _api_post(session, base_url, "/employee/employment/details", det_body, trace)
+
+                    # Step 3: Occupation code
+                    occ_code = _val(data, "occupationCode")
+                    if occ_code and empl_id:
+                        r, s = _api_get(session, base_url, "/employee/employment/occupationCode",
+                                        {"code": str(occ_code), "fields": "id,code"}, trace)
+                        occ_codes = r.get("values", [])
+                        if occ_codes:
+                            occ_id = occ_codes[0]["id"]
+                            r2, _ = _api_get(session, base_url, f"/employee/employment/{empl_id}",
+                                             {"fields": "id,version"}, trace)
+                            empl_version = r2.get("value", {}).get("version")
+                            if empl_version:
+                                empl_put = {
+                                    "id": empl_id,
+                                    "employee": {"id": emp_id},
+                                    "startDate": start_date,
+                                    "division": {"id": div_id},
+                                    "isMainEmployer": True,
+                                    "taxDeductionCode": "loennFraHovedarbeidsgiver",
+                                    "occupationCode": {"id": occ_id},
+                                    "version": empl_version,
+                                }
+                                _api_put(session, base_url, f"/employee/employment/{empl_id}", trace, body=empl_put)
+
+    # Step 4: Standard time
+    std_body = {
+        "employee": {"id": emp_id},
+        "fromDate": start_date,
+        "hoursPerDay": round(7.5 * float(pct) / 100, 2),
+    }
+    _api_post(session, base_url, "/employee/standardTime", std_body, trace)
+
+    # Step 5: Salary transaction
+    salary = _parse_amount(data.get("salary", 0))
+    if salary > 0:
+        # Use start_date month/year so employment period matches
+        try:
+            sd = date.fromisoformat(start_date)
+            sal_month = sd.month
+            sal_year = sd.year
+        except (ValueError, TypeError):
+            sal_month = date.today().month
+            sal_year = date.today().year
+        salary_types = ctx.get("salary_types", {})
+        type_2000 = salary_types.get("2000", {})
+
+        if type_2000.get("id"):
+            sal_body = {
+                "date": start_date,
+                "month": sal_month,
+                "year": sal_year,
+                "payslips": [{
+                    "employee": {"id": emp_id},
+                    "date": start_date,
+                    "year": sal_year,
+                    "month": sal_month,
+                    "specifications": [{
+                        "salaryType": {"id": type_2000["id"]},
+                        "rate": round(salary / 12, 2),
+                        "count": 1,
+                        "amount": round(salary / 12, 2),
+                    }],
+                }],
+            }
+            _api_post(session, base_url, "/salary/transaction", sal_body, trace,
+                       params={"generateTaxDeduction": "true"})
+
+    return trace
+
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: SUPPLIER INVOICE FROM PDF
+# ═══════════════════════════════════════════════════════════
+
+def handle_supplier_invoice_pdf(data, session, base_url, ctx):
+    """Same as handle_supplier_invoice but data comes from PDF extraction."""
+    return handle_supplier_invoice(data, session, base_url, ctx)
+
+
+# ═══════════════════════════════════════════════════════════
 # HANDLER REGISTRY + SOLVE FUNCTION
 # ═══════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+# HANDLER: LEDGER AUDIT
+# ═══════════════════════════════════════════════════════════
+
+def handle_ledger_audit(data, session, base_url, ctx):
+    """Fix ledger errors described in the prompt. Each error gets a corrective voucher."""
+    trace = []
+    today = _today()
+    errors = data.get("errors", [])
+
+    for i, error in enumerate(errors):
+        error_type = error.get("type", "").lower()
+        desc = error.get("description", f"Error {i+1}")
+        amount = _parse_amount(error.get("amount", 0))
+        wrong_account = str(error.get("wrongAccount", ""))
+        correct_account = str(error.get("correctAccount", ""))
+        voucher_date = _val(error, "date", today)
+
+        if not amount:
+            continue
+
+        postings = []
+
+        if any(x in error_type for x in ("wrong_account", "feil konto", "incorrect account", "wrong account", "cuenta incorrecta", "mauvais compte", "falsches konto", "conta errada")):
+            # Wrong account: debit correct, credit wrong (reverse the error)
+            correct_id = _get_acct_id(ctx, correct_account)
+            wrong_id = _get_acct_id(ctx, wrong_account)
+            if not correct_id:
+                r, _ = _api_get(session, base_url, "/ledger/account", {"number": correct_account, "fields": "id"}, trace)
+                vals = r.get("values", [])
+                if vals:
+                    correct_id = vals[0]["id"]
+            if not wrong_id:
+                r, _ = _api_get(session, base_url, "/ledger/account", {"number": wrong_account, "fields": "id"}, trace)
+                vals = r.get("values", [])
+                if vals:
+                    wrong_id = vals[0]["id"]
+            if correct_id and wrong_id:
+                postings = [
+                    {"account": {"id": correct_id}, "amountGross": amount, "amountGrossCurrency": amount, "date": voucher_date, "row": 1, "vatType": {"id": 0}},
+                    {"account": {"id": wrong_id}, "amountGross": -amount, "amountGrossCurrency": -amount, "date": voucher_date, "row": 2, "vatType": {"id": 0}},
+                ]
+
+        elif any(x in error_type for x in ("duplicate", "duplikat", "duplicado", "dupliziert", "doublé", "dobbel")):
+            # Duplicate: reverse it
+            acct_id = _get_acct_id(ctx, wrong_account) or _get_acct_id(ctx, correct_account)
+            if not acct_id:
+                acct_num = wrong_account or correct_account
+                if acct_num:
+                    r, _ = _api_get(session, base_url, "/ledger/account", {"number": acct_num, "fields": "id"}, trace)
+                    vals = r.get("values", [])
+                    if vals:
+                        acct_id = vals[0]["id"]
+            bank_id = _get_acct_id(ctx, "1920")
+            if acct_id and bank_id:
+                postings = [
+                    {"account": {"id": acct_id}, "amountGross": -amount, "amountGrossCurrency": -amount, "date": voucher_date, "row": 1, "vatType": {"id": 0}},
+                    {"account": {"id": bank_id}, "amountGross": amount, "amountGrossCurrency": amount, "date": voucher_date, "row": 2, "vatType": {"id": 0}},
+                ]
+
+        elif any(x in error_type for x in ("vat", "mva", "missing_vat", "missing vat", "iva", "mwst", "tva")):
+            # Missing VAT: debit EXPENSE account with vatType:1 (Tripletex auto-splits to create 2710 entry)
+            # Never post directly to 2710 — it's locked to vatType:0
+            expense_account = str(error.get("expenseAccount", ""))
+            # Determine the expense account: use expenseAccount field, or pick the non-27xx account
+            if not expense_account:
+                for candidate in [wrong_account, correct_account]:
+                    if candidate and not candidate.startswith("27"):
+                        expense_account = candidate
+                        break
+            if not expense_account:
+                expense_account = "6540"  # fallback to general expense
+            expense_id = _get_acct_id(ctx, expense_account)
+            if not expense_id:
+                r, _ = _api_get(session, base_url, "/ledger/account", {"number": expense_account, "fields": "id"}, trace)
+                vals = r.get("values", [])
+                if vals:
+                    expense_id = vals[0]["id"]
+            bank_id = _get_acct_id(ctx, "1920")
+            if expense_id and bank_id:
+                postings = [
+                    {"account": {"id": expense_id}, "amountGross": amount, "amountGrossCurrency": amount, "date": voucher_date, "row": 1, "vatType": {"id": 1}},
+                    {"account": {"id": bank_id}, "amountGross": -amount, "amountGrossCurrency": -amount, "date": voucher_date, "row": 2, "vatType": {"id": 0}},
+                ]
+
+        elif any(x in error_type for x in ("wrong_amount", "feil belop", "feil beløp", "incorrect amount", "monto incorrecto", "montant incorrect", "falscher betrag", "valor errado")):
+            # Wrong amount: reverse wrong, post correct
+            correct_amount = _parse_amount(error.get("correctAmount", 0))
+            acct_id = _get_acct_id(ctx, correct_account or wrong_account)
+            if not acct_id:
+                acct_num = correct_account or wrong_account
+                if acct_num:
+                    r, _ = _api_get(session, base_url, "/ledger/account", {"number": acct_num, "fields": "id"}, trace)
+                    vals = r.get("values", [])
+                    if vals:
+                        acct_id = vals[0]["id"]
+            bank_id = _get_acct_id(ctx, "1920")
+            diff = correct_amount - amount
+            if acct_id and bank_id and diff:
+                postings = [
+                    {"account": {"id": acct_id}, "amountGross": diff, "amountGrossCurrency": diff, "date": voucher_date, "row": 1, "vatType": {"id": 0}},
+                    {"account": {"id": bank_id}, "amountGross": -diff, "amountGrossCurrency": -diff, "date": voucher_date, "row": 2, "vatType": {"id": 0}},
+                ]
+
+        if postings:
+            voucher_body = {
+                "date": voucher_date,
+                "description": f"Korreksjon: {desc}",
+                "postings": postings,
+            }
+            _api_post(session, base_url, "/ledger/voucher", voucher_body, trace, params={"sendToLedger": "true"})
+
+    return trace
+
 
 DETERMINISTIC_HANDLERS = {
     "customer": handle_customer,
@@ -2147,6 +3303,16 @@ DETERMINISTIC_HANDLERS = {
     "project": handle_project,
     "project_fixed": handle_project_fixed,
     "timesheet": handle_timesheet,
+    "travel_expense": handle_travel_expense,
+    "delete_travel": handle_delete_travel,
+    "bank_recon": handle_bank_recon,
+    "project_lifecycle": handle_project_lifecycle,
+    "fx_invoice": handle_fx_invoice,
+    "reminder_fee": handle_reminder_fee,
+    "month_end": handle_month_end,
+    "employee_pdf": handle_employee_pdf,
+    "supplier_invoice_pdf": handle_supplier_invoice_pdf,
+    "ledger_audit": handle_ledger_audit,
 }
 
 

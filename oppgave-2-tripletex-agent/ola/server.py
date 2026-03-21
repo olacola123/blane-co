@@ -33,7 +33,8 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=1, ti
 HAIKU_TASKS = {"customer", "product", "departments", "supplier", "employee",
                "invoice_send", "payment", "reverse_payment",
                "credit_note", "contact_person",
-               "travel_expense", "delete_travel"}
+               "travel_expense", "delete_travel",
+               "acct_dimension", "order", "invoice_multi"}
 
 LOG_PATH = Path(os.environ.get("SUBMISSION_LOG", "/tmp/tripletex_submissions.jsonl"))
 
@@ -283,12 +284,6 @@ def execute_tool(name: str, input_data: dict, session: requests.Session, base_ur
                 log.info(f"Fixed voucher: merged 3 manual-VAT postings → 2 auto-VAT postings (gross={merged_gross})")
 
     # ── UNIVERSAL INTERCEPTORS (fix common Claude mistakes) ──
-
-    # Block /incomingInvoice — always 403 in competition, waste of calls
-    if name == "tripletex_post" and "incomingInvoice" in endpoint:
-        log.info("BLOCKED POST /incomingInvoice — use /ledger/voucher instead")
-        trace.append({"tool": name, "endpoint": endpoint, "status": 403, "error": "blocked"})
-        return json.dumps({"error": "403 Forbidden. Use POST /ledger/voucher with postings array instead.", "status": 403})
 
     # Block nonexistent endpoints Claude hallucinates
     fake_endpoints = ("/voucher", "/journalEntry", "/generalLedgerEntry", "/ledger/entry",
@@ -1143,36 +1138,38 @@ def process_files(files: list) -> tuple[list[str], list[dict]]:
 def detect_task_type(prompt: str) -> str:
     """Detect task type from prompt for logging and iteration limits."""
     import unicodedata
-    p = unicodedata.normalize("NFKD", prompt.lower()).encode("ascii", "ignore").decode("ascii")
+    # Normalize: replace accented chars with ASCII equivalents, then strip remaining non-ASCII
+    p = unicodedata.normalize("NFKD", prompt.lower())
+    p = p.replace("ø", "o").replace("å", "a").replace("æ", "ae").replace("ü", "u").replace("ö", "o").replace("ä", "a")
+    p = p.encode("ascii", "ignore").decode("ascii")
     # Order matters — more specific patterns first
     if re.search(r'(slett|delete|supprim|elimin).*(reise|travel|viagem|frais)|(reise|travel|viagem|frais).*(slett|delete|supprim|elimin)', p):
         return "delete_travel"
-    if re.search(r'månedsavslut|månadsavslut|månavslutn|monatsabschluss|month.end.clos|clôture.mensuel|cierre.mensual|encerramento.mensal|monthly.closing', p):
+    if re.search(r'manedsavslut|manadsavslut|manavslutn|monatsabschluss|month.end.clos|cloture.mensuel|cierre.mensual|encerramento.mensal|monthly.closing', p):
         return "month_end"
-    if re.search(r'avskriv|depreciation|abschreibung|årsoppgjør|year.end|encerramento.anual|clôture.annuelle|forenkl.*årsoppgj', p):
+    if re.search(r'avskriv|depreciation|abschreibung|arsoppgjor|year.end|encerramento.anual|cloture.annuelle|forenkl.*arsoppgj', p):
         return "year_end"
     if re.search(r'reconcil|bankavsteming|bankavstemming|extracto.bancario|avstem.*bank|concilia.*extracto|bank.statement|bankutskrift|relev.+bancaire|rapprochez.*relev|kontoauszug|extrato.banc', p):
         return "bank_recon"
-    if re.search(r'erros.*livro|errors.*ledger|feil.*hovedbok|errores.*libro|fehler.*hauptbuch|erreurs.*grand.livre|erros.*razão|feil.*bilag|errors.*voucher', p):
+    if re.search(r'erros.*livro|errors.*ledger|feil.*hovedbok|errores.*libro|fehler.*hauptbuch|erreurs.*grand.livre|erros.*razao|feil.*bilag|errors.*voucher', p):
         return "ledger_audit"
     if re.search(r'ciclo.de.vida|prosjektsykl|project.lifecycle|hele.prosjekt|full.project.cycle|prosjektsyklusen|ciclo.*completo.*projeto', p):
         return "project_lifecycle"
-    if re.search(r'costos.*aumentaron|costs.*increased|utgift.*økt|identifique.*gastos|identify.*expense.*increase|analice.*libro.*mayor|analys.*ledger.*identify|totalkostnad.*auka|kostnad.*økt.*januar|despesas.*aumentaram|coûts.*augmenté|kosten.*gestiegen|finn.*tre.*kostnadskonto|find.*three.*expense.*account|identifique.*três.*contas', p):
+    if re.search(r'costos.*aumentaron|costs.*increased|utgift.*okt|identifique.*gastos|identify.*expense.*increase|analice.*libro.*mayor|analys.*ledger.*identify|totalkostnad.*auka|kostnad.*okt.*januar|despesas.*aumentaram|couts.*augmente|kosten.*gestiegen|finn.*tre.*kostnadskonto|find.*three.*expense.*account|identifique.*tres.*contas', p):
         return "cost_analysis"
-    if re.search(r'câmbio|exchange.rate|wechselkurs|tipo.de.cambio|taux.de.change|kursforskjell|agio|disagio|\beur\b.*nok.*rate|\beur\b.*taxa|\beur\b.*kurs', p):
+    if re.search(r'cambio|exchange.rate|wechselkurs|tipo.de.cambio|taux.de.change|kursforskjell|agio|disagio|\beur\b.*nok.*rate|\beur\b.*taxa|\beur\b.*kurs', p):
         return "fx_invoice"
-    if re.search(r'purregebyr|reminder.fee|lembrete.*taxa|mahngebühr|taxa.de.lembrete|fatura.vencida.*taxa|overdue.*reminder|forfalt.*faktura.*gebyr|facture.*impayée.*frais|factura.*vencida.*cargo', p):
+    if re.search(r'purregebyr|reminder.fee|lembrete.*taxa|mahngebuh?r|taxa.de.lembrete|fatura.vencida.*taxa|overdue.*reminder|forfalt.*faktura.*gebyr|facture.*impayee.*frais|factura.*vencida.*cargo|uberfallige.*rechnung|uberfalliger?.*rechnung', p):
         return "reminder_fee"
-    if re.search(r'arbeidskontrakt|employment.contract|contrato.de.trabajo|arbeitsvertrag|contrat.de.travail|carta.de.oferta|offer.letter|lettre.d.offre|tilbudsbrev|onboarding.*complet|integra.+compl|incorpora.+compl', p):
+    if re.search(r'arbeidskontrakt|employment.contract|contrato.de.trabajo|arbeitsvertrag|contrat.de.travail|carta.de.oferta|offer.letter|lettre.d.offre|tilbudsbrev|tilbodsbrev|onboarding|integra.+compl|incorpora.+compl', p):
         return "employee_pdf"
-    if re.search(r'kvittering|receipt|quittung|recibo|recu|necesitamos.*gasto|gasto.*recibo|besoin.*depense.*recu|depense.*recu|ce recu|dieser quittung|dette kvittering|this receipt|deste recibo|este recibo', p) and not re.search(r'inv-\d+', p):
+    if re.search(r'kvittering|receipt|quittung|recibo|recu|necesitamos.*gasto|gasto.*recibo|besoin.*depense.*recu|depense.*recu|ce recu|dieser quittung|dette kvittering|this receipt|deste recibo|este recibo|comptabiliser.*depense|enregistrer.*depense|depense.*recu', p) and not re.search(r'inv-\d+', p):
         return "receipt_voucher"
-    if re.search(r'(lieferantenrechnung|supplier.invoice|factura.+proveedor|fatura.+fornecedor).*(pdf|beigefügt|attached|adjunt|anexo)', p):
+    if re.search(r'(lieferantenrechnung|supplier.invoice|factura.+proveedor|fatura.+fornecedor).*(pdf|beigefugt|attached|adjunt|anexo)', p):
         return "supplier_invoice_pdf"
     # Salary — but NOT if it's actually month-end/year-end with salary accrual
-    if re.search(r'lønn|løn\b|payroll|nómina|gehalt|salário|salary', p):
-        # Exclude if it's a closing/accrual task that just mentions salary
-        if not re.search(r'monatsabschluss|månedsavslut|månadsavslut|månavslutn|month.end|årsoppgjør|year.end|clôture|encerramento|cierre|rückstellung|avsetjing|avsetting|accrual|periodiser', p):
+    if re.search(r'lonn|lon\b|payroll|nomina|gehalt|salario|salary', p):
+        if not re.search(r'monatsabschluss|manedsavslut|manadsavslut|manavslutn|month.end|arsoppgjor|year.end|cloture|encerramento|cierre|ruckstellung|avsetjing|avsetting|accrual|periodiser', p):
             return "salary"
     if re.search(r'inv-\d+', p):
         return "supplier_invoice"
@@ -1180,35 +1177,35 @@ def detect_task_type(prompt: str) -> str:
         return "travel_expense"
     if re.search(r'kontaktperson|contact.person|persona.de.contacto|pessoa.de.contato|ansprechpartner', p):
         return "contact_person"
-    if re.search(r'reklamert|reclamou|reclamado|complained|réclamé', p):
+    if re.search(r'reklamert|reclamou|reclamado|complained|reclame', p):
         return "credit_note"
-    if re.search(r'betaling.*returnert|payment.*returned|pago.*devuelto|pagamento.*dev|zahlung.*zurück|paiement.*retourné', p):
+    if re.search(r'betaling.*returnert|payment.*returned|pago.*devuelto|pagamento.*dev|zahlung.*zuruck|paiement.*retourne', p):
         return "reverse_payment"
-    if re.search(r'fastpris|fixed.price|prix.forfaitaire|precio.fijo|preço.fixo|festpreis', p):
+    if re.search(r'fastpris|fixed.price|prix.forfaitaire|precio.fijo|preco.fixo|festpreis', p):
         return "project_fixed"
-    if re.search(r'rekneskapsdimensjon|regnskapsdimensjon|accounting.dimension|dimension.compt|buchhaltungs.imension|dimensão', p):
+    if re.search(r'rekneskapsdimensjon|regnskapsdimensjon|accounting.dimension|dimension.compt|buchhaltungs.imension|dimensao', p):
         return "acct_dimension"
     if re.search(r'registrer?\s+\d+\s*(tim|hour|hora|stund|heur)|registe\s+\d+|log\s+\d+\s+hour|enregistrez\s+\d+\s+heur', p):
         return "timesheet"
-    if re.search(r'utestående|outstanding|pendiente|pendente|offene.*rechnung|impayée|uteståande', p):
+    if re.search(r'utestaende|outstanding|pendiente|pendente|offene.*rechnung|impayee|utestaande|paiement.*facture|facture.*impayee', p):
         return "payment"
-    if re.search(r'tre.*avdeling|three.*department|três.*departam|tres.*departam|drei.*abteilung|trois.*département', p):
+    if re.search(r'tre.*avdeling|three.*department|tres.*departam|tres.*departam|drei.*abteilung|trois.*departement', p):
         return "departments"
-    if re.search(r'opprett.*prosjekt|create.*project|crie.*projeto|crea.*proyecto|erstellen.*projekt|créez.*projet', p):
+    if re.search(r'opprett.*prosjekt|create.*project|crie.*projeto|crea.*proyecto|erstellen.*projekt|creez.*projet', p):
         return "project"
-    if re.search(r'opprett.*ordre|create.*order|crie.*commande|cria.*pedido|erstellen.*auftrag|créez.*commande', p):
+    if re.search(r'opprett.*ordre|create.*order|crie.*commande|cria.*pedido|erstellen.*auftrag|creez.*commande', p):
         return "order"
-    if re.search(r'tre.*produktlinj|three.*product.line|três.*linha|tres.*línea|drei.*produkt|trois.*ligne|com três.*produto|con tres.*producto|mit drei.*produkt|avec trois.*produit|with three.*product', p):
+    if re.search(r'tre.*produktlinj|three.*product.line|tres.*linha|tres.*linea|drei.*produkt|trois.*ligne|com tres.*produto|con tres.*producto|mit drei.*produkt|avec trois.*produit|with three.*product', p):
         return "invoice_multi"
-    if re.search(r'opprett.*send.*faktura|create.*send.*invoice|crie.*envie|crea.*env.*factura|erstellen.*senden.*rechnung|créez.*envoyez', p):
+    if re.search(r'opprett.*send.*faktura|create.*send.*invoice|crie.*envie|crea.*env.*factura|erstellen.*senden.*rechnung|creez.*envoyez', p):
         return "invoice_send"
-    if re.search(r'ny.*ansatt|new.*employee.*born|novo.*funcion|nuevo.*empleado|neuen.*mitarbeiter|nouvel.*employé|ny.*tilsett', p):
+    if re.search(r'ny.*ansatt|new.*employee.*born|novo.*funcion|nuevo.*empleado|neuen.*mitarbeiter|nouvel.*employe|ny.*tilsett|nouveau.*employe|nova.*funcion', p):
         return "employee"
-    if re.search(r'registr.*leverand|regist.*liefer|regist.*fornecedor|regist.*proveedor', p):
+    if re.search(r'registr.*leverand|regist.*liefer|regist.*fornecedor|regist.*proveedor|enregistr.*fournisseur', p):
         return "supplier"
-    if re.search(r'opprett.*produkt|create.*product|crie.*produit|crea.*producto|erstellen.*produkt|crie.*produto', p):
+    if re.search(r'opprett.*produkt|create.*product|crie.*produit|crea.*producto|erstellen.*produkt|crie.*produto|enregistr.*produit', p):
         return "product"
-    if re.search(r'opprett.*kunde|create.*customer|crie.*cliente|crea.*cliente|erstellen.*kund|créez.*client', p):
+    if re.search(r'opprett.*kunde|create.*customer|crie.*cliente|crea.*cliente|erstellen.*kund|creez.*client|enregistr.*client', p):
         return "customer"
     return "unknown"
 
@@ -1313,9 +1310,10 @@ async def _solve_inner(body, start_time):
             full_prompt = prompt
             if file_text:
                 full_prompt += f"\n\nAttached files:\n{file_text}"
+            extraction_model = HAIKU_MODEL if task_type in HAIKU_TASKS else CLAUDE_MODEL
             trace = solve_deterministic(
-                task_type, full_prompt, files, session, base_url, ctx,
-                claude_client, CLAUDE_MODEL, start_time, image_blocks
+                task_type, full_prompt, [], session, base_url, ctx,
+                claude_client, extraction_model, start_time, image_blocks
             )
             elapsed = time.time() - start_time
             total_calls = len(trace)
