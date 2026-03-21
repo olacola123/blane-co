@@ -25,8 +25,7 @@ log = logging.getLogger("agent")
 
 app = FastAPI()
 
-_FALLBACK_KEY = "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"
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "") or _FALLBACK_KEY
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=1, timeout=60.0)
