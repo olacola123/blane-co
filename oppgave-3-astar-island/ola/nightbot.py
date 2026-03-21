@@ -43,9 +43,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from solution import (
     AstarClient, load_calibration, SeedObserver,
     build_cross_seed_prior, apply_cross_seed,
-    plan_queries, infer_round_type, adjust_priors_for_round,
+    plan_queries,
     load_learning_state, save_learning_state,
-    MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS, PROB_FLOOR, DEFAULT_ALPHA,
+    MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS, PROB_FLOOR, NEAR_ZERO, DEFAULT_ALPHA,
     distance_to_nearest_settlement, get_distance_band, is_coastal, get_prior,
 )
 

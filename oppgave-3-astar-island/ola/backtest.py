@@ -85,7 +85,7 @@ def score_from_kl(wkl):
 
 
 def backtest_round(client, round_id, round_num, seeds_data, transition_table,
-                   simple_prior, alpha_override=None):
+                   simple_prior, alpha_override=None, typed_table=None):
     """Test solveren mot fasit for én runde."""
     results = []
 
@@ -94,12 +94,9 @@ def backtest_round(client, round_id, round_num, seeds_data, transition_table,
         grid = seed_data.get("grid", [])
         settlements = seed_data.get("settlements", [])
 
-        # Bygg prediksjon med BARE prior (ingen observasjoner)
-        observer = SeedObserver(grid, settlements, transition_table, simple_prior)
-
-        # Hvis alpha_override, simuler "perfekte" observasjoner fra ground truth
-        # (for å teste alpha-tuning)
-        pred = observer.build_prediction()
+        observer = SeedObserver(grid, settlements, transition_table, simple_prior,
+                               typed_table=typed_table)
+        pred = observer.build_prediction(world_type=getattr(backtest_round, '_world_type', None))
 
         # Hent fasit
         try:
@@ -148,6 +145,14 @@ def main():
     client = SimpleClient()
     transition_table, simple_prior = load_calibration()
 
+    # Last 4-type calibration
+    cal4_file = Path(__file__).parent / "calibration_4type.json"
+    type_tables = None
+    if cal4_file.exists():
+        data4 = json.loads(cal4_file.read_text())
+        type_tables = data4.get("tables", {})
+        print(f"Lastet 4-type tabeller: {', '.join(f'{k}({len(v)})' for k,v in type_tables.items())}\n")
+
     print("=== BACKTEST: Prior-only vs. faktisk score ===\n")
 
     rounds = client.get("/rounds")
@@ -168,10 +173,46 @@ def main():
         round_data = client.get(f"/rounds/{round_id}")
         seeds_data = round_data.get("seeds", round_data.get("initial_states", []))
 
-        print(f"--- Runde {rnum} (vekt {weight:.3f}) ---")
+        # Oracle vitality: beregn fra GT for å teste blending
+        oracle_vitality = 0.5
+        if type_tables:
+            try:
+                analysis = client.get(f"/analysis/{round_id}/0")
+                gt = analysis.get("ground_truth")
+                if gt:
+                    gt_arr = np.array(gt, dtype=float)
+                    settlements = seeds_data[0].get("settlements", [])
+                    total_s, survived_s = 0, 0.0
+                    for s in settlements:
+                        sx, sy = s["x"], s["y"]
+                        if 0 <= sx < 40 and 0 <= sy < 40:
+                            total_s += 1
+                            survived_s += gt_arr[sy, sx, 1]
+                    if total_s > 0:
+                        rate = survived_s / total_s
+                        n_settlements = len(settlements)
+                        if rate < 0.08:
+                            wt = "DEAD"
+                        elif rate < 0.35:
+                            wt = "STABLE"
+                        else:
+                            wt = "BOOM_CONC" if n_settlements >= 40 else "BOOM_SPREAD"
+                        oracle_vitality = rate  # Not used for discrete
+                        print(f"--- Runde {rnum} (vekt {weight:.3f}) [{wt} surv={rate:.2f} n={n_settlements}] ---")
+                    else:
+                        print(f"--- Runde {rnum} (vekt {weight:.3f}) ---")
+                else:
+                    print(f"--- Runde {rnum} (vekt {weight:.3f}) ---")
+            except Exception:
+                print(f"--- Runde {rnum} (vekt {weight:.3f}) ---")
+        else:
+            print(f"--- Runde {rnum} (vekt {weight:.3f}) ---")
 
+        # Velg riktig tabell for denne runden
+        typed_table = type_tables.get(wt) if type_tables else None
         results = backtest_round(client, round_id, rnum, seeds_data,
-                                transition_table, simple_prior, args.with_alpha)
+                                transition_table, simple_prior, args.with_alpha,
+                                typed_table=typed_table)
 
         for res in results:
             if "prior_only_score" in res:

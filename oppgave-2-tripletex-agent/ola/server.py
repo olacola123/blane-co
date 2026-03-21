@@ -488,53 +488,21 @@ CRITICAL RULES:
 
 LANGUAGES: Prompts come in NO, EN, ES, PT, NN, DE, FR. Parse dates in any language to YYYY-MM-DD.
 
-═══ EMPLOYEE EMAIL HANDLING (MOST IMPORTANT) ═══
-Pre-populated employees exist in every sandbox. When creating an employee:
-1. CHECK the EXISTING EMPLOYEES list in the context below
-2. If the email from the task matches an existing employee → PUT /employee/ID with ALL fields from the prompt + version from context
-3. If no match → POST /employee as normal
-4. NEVER modify the email address. NEVER add "2" or any suffix.
-5. When doing PUT, include: firstName, lastName, email (unchanged!), userType, department, dateOfBirth (use "1985-01-01" if not in prompt), phoneNumberMobile (if in prompt), version
-
-═══ ENDPOINT REFERENCE ═══
-
-GET /token/session/>whoAmI → company ID
-
-── EMPLOYEE ──
-POST /employee {{firstName, lastName, email, userType:"STANDARD", department:{{id:X}}, phoneNumberMobile, dateOfBirth}}
+═══ EMPLOYEE ═══
+If email matches EXISTING EMPLOYEES → PUT /employee/ID (with version from context). Else POST /employee.
+POST /employee {{firstName, lastName, email, userType:"STANDARD", department:{{id:X}}, dateOfBirth, employeeNumber}}
 PUT /employee/ID {{firstName, lastName, email, userType, department:{{id:X}}, dateOfBirth, version:V}}
-- userType: "STANDARD" (normal), "EXTENDED" (for project managers/admins), "NO_ACCESS"
-- NEVER use "ADMINISTRATOR" as userType
-- dateOfBirth required if you need to create employment
-- Employee address uses "address" field: {{addressLine1, postalCode, city}} (NOT postalAddress like customer!)
+userType: STANDARD | EXTENDED (project managers) | NO_ACCESS. NEVER "ADMINISTRATOR".
+Address: use "address" (NOT postalAddress). NEVER modify email.
 
-── EMPLOYMENT (for start date / salary tasks) ──
-Step 1: Create/update employee (with dateOfBirth!)
-Step 2: POST /employee/employment {{employee:{{id:X}}, startDate:"YYYY-MM-DD", division:{{id:DIVISION_ID}}, isMainEmployer:true, taxDeductionCode:"loennFraHovedarbeidsgiver"}}
-  If no division exists: POST /division {{name:"Hovedkontor", startDate:"{today}", municipality:{{id:262}}, organizationNumber:"996757435"}}
-Step 3: ALWAYS create employment details after employment:
-  POST /employee/employment/details {{employment:{{id:X}}, date:"{today}", employmentType:"ORDINARY", employmentForm:"PERMANENT", remunerationType:"MONTHLY_WAGE", workingHoursScheme:"NOT_SHIFT", percentageOfFullTimeEquivalent:100.0}}
-  CRITICAL: percentageOfFullTimeEquivalent:100.0 is REQUIRED — scoring checks this!
+── EMPLOYMENT ──
+POST /division {{name:"Hovedkontor", startDate:"{today}", municipality:{{id:262}}, organizationNumber:"996757435"}}
+POST /employee/employment {{employee:{{id:X}}, startDate:"YYYY-MM-DD", division:{{id:DIV}}, isMainEmployer:true, taxDeductionCode:"loennFraHovedarbeidsgiver"}}
+POST /employee/employment/details {{employment:{{id:X}}, date:"{today}", employmentType:"ORDINARY", employmentForm:"PERMANENT", remunerationType:"MONTHLY_WAGE", workingHoursScheme:"NOT_SHIFT", percentageOfFullTimeEquivalent:100.0}}
+Use PDF/prompt value for percentageOfFullTimeEquivalent — NOT always 100!
 
-── EMPLOYEE FROM PDF CONTRACT ──
-When prompt mentions a PDF/attached contract ("Arbeitsvertrag", "arbeidskontrakt", "employment contract"):
-Extract ALL fields from the PDF and map them:
-- Personalnummer / Employee number → POST /employee with employeeNumber:"VALUE"
-- Geburtsdatum / Date of birth → dateOfBirth:"YYYY-MM-DD"
-- Abteilung / Department → POST /department {{name:"DEPT_FROM_PDF"}} if not in context, then use its ID
-- Berufsschlüssel / Occupation code → GET /employee/employment/occupationCode?code=DIGITS&fields=id,code,nameNO to find ID (API searches by substring, use first result), then include occupationCode:{{id:X}} in employment details POST
-- Gehalt / Salary → After creating employment, POST /salary/transaction with the salary amount
-  If salary/transaction → 403: POST /ledger/voucher with 5000 debit, 2780 credit
-- Beschäftigungsprozentsatz / Employment percentage → percentageOfFullTimeEquivalent:VALUE (NOT always 100!)
-- Startdatum / Start date → employment startDate
-- Stillingsprosent → percentageOfFullTimeEquivalent
-CRITICAL: Read EVERY field from the PDF. Do NOT use defaults — use the EXACT values from the contract!
-The PDF contains the ground truth. Extract: name, email, birthdate, employee number, department, occupation code, salary, percentage, start date, employment type, employment form.
-IMPORTANT FIELD MAPPING:
-- "Personnummer"/"Número de identidad"/"Identitätsnummer" = nationalIdentityNumber on employee (11 digits), NOT employeeNumber
-- "Personalnummer"/"Employee number" = employeeNumber on employee (short number like "10042")
-- "Gehalt"/"Salario"/"Salary" = MONTHLY salary amount → use in salary/transaction
-- If occupation code is 4 digits (STYRK): search GET /employee/employment/occupationCode?code=DIGITS — use first match
+── PDF CONTRACT ──
+Extract ALL from PDF: name, email, dateOfBirth, employeeNumber (short), nationalIdentityNumber (11 digits), department, occupationCode (GET /employee/employment/occupationCode?code=DIGITS), salary (monthly), percentage, startDate.
 
 ── ADMIN EMPLOYEE ──
 POST /employee {{userType:"EXTENDED"}} → POST /employee/entitlement {{employee:{{id:X}}, entitlementId:1, customer:{{id:{company_id or 'COMPANY_ID'}}}}}
@@ -637,32 +605,10 @@ After fixed price project:
 11. POST /invoice {{invoiceDate:"{today}", invoiceDueDate:"{due}", orders:[{{id:X}}]}} query_params: sendToCustomer=false
 
 ── TRAVEL EXPENSE ──
-1. Create/update employee (if needed)
-2. POST /travelExpense {{employee:{{id:X}}, title:"...", travelDetails:{{departureDate:"YYYY-MM-DD", returnDate:"YYYY-MM-DD", departureFrom:"CITY_FROM_PROMPT", destination:"CITY_FROM_PROMPT", purpose:"PURPOSE_FROM_PROMPT"}}}}
-- Dates go INSIDE travelDetails, NOT flat!
-- travelDetails with departureFrom/destination/purpose = type 0 (travel)
-- ONLY set departureFrom/destination if mentioned in prompt — do NOT invent cities
-3. For per diem / daily allowance ("dagpenger", "diett", "ajudas de custo", "per diem", "daily rate"):
-   Use PER DIEM RATE CATEGORY ID from context (pre-fetched, do NOT search yourself).
-   POST /travelExpense/perDiemCompensation {{travelExpense:{{id:X}}, rateCategory:{{id:RATE_CATEGORY_ID_FROM_CONTEXT}}, count:NUM_DAYS, rate:DAILY_RATE, overnightAccommodation:"HOTEL", location:"DESTINATION_CITY"}}
-   - DAILY_RATE = the exact daily rate from prompt (e.g. 800)
-   - count = number of days from prompt
-   - location = destination city from prompt
-   - Do NOT use /travelExpense/cost for per diem! Use /travelExpense/perDiemCompensation!
-4. For regular expenses (flight, taxi, hotel costs etc.):
-   Use TRAVEL EXPENSE COST CATEGORIES and PAYMENT TYPES from context (pre-fetched, do NOT GET them yourself!).
-   POST /travelExpense/cost {{travelExpense:{{id:X}}, costCategory:{{id:Y}}, paymentType:{{id:Z}}, amountCurrencyIncVat:AMOUNT, currency:{{id:1}}, date:"YYYY-MM-DD"}}
-   - Use "costCategory" NOT "category"
-   - Use "comments" NOT "description" for cost line text
-   - Match costCategory by description: "Fly", "Hotell", "Taxi", "Mat", "Parkering", etc.
-
-── DELETE TRAVEL EXPENSE ──
-1. GET /travelExpense?fields=id,title,state&count=100
-2. For each matching expense:
-   a. If state == "DELIVERED": PUT /travelExpense/:undeliver query_params: id=X
-   b. If state == "APPROVED": PUT /travelExpense/:unapprove query_params: id=X
-   c. DELETE /travelExpense/ID
-   IMPORTANT: Must unapprove/undeliver BEFORE delete! State transitions: DELIVERED→APPROVED→OPEN→DELETE
+POST /travelExpense {{employee:{{id:X}}, title:"...", travelDetails:{{departureDate:"YYYY-MM-DD", returnDate:"YYYY-MM-DD", departureFrom:"CITY", destination:"CITY", purpose:"..."}}}}
+Per diem: POST /travelExpense/perDiemCompensation {{travelExpense:{{id:X}}, rateCategory:{{id:FROM_CONTEXT}}, count:DAYS, rate:DAILY_RATE, overnightAccommodation:"HOTEL", location:"CITY"}}
+Costs: POST /travelExpense/cost {{travelExpense:{{id:X}}, costCategory:{{id:Y}}, paymentType:{{id:Z}}, amountCurrencyIncVat:AMT, currency:{{id:1}}, date:"YYYY-MM-DD"}}
+Delete: GET /travelExpense → if APPROVED: PUT /:unapprove?id=X → DELETE /travelExpense/ID
 
 ── SALARY / PAYROLL ──
 Step 1: Find employee by email in EXISTING EMPLOYEES context.
@@ -691,80 +637,46 @@ Step 4: Try salary/transaction first:
      CRITICAL: Credit account MUST be 2780 (Skyldig lønn) — NEVER use 1920!
      Use LEDGER ACCOUNT IDS from context for account IDs. Separate postings for base salary and bonus.
 
-── VOUCHER / JOURNAL ENTRY ──
-1. GET /ledger/account?fields=id,number,name&number=NNNN (search by account number)
-   (skip if account is in LEDGER ACCOUNT IDS context: 5000, 1920, 2780, 2710, 2400)
-2. POST /ledger/voucher {{date:"{today}", description:"...", postings:[
-     {{account:{{id:DEBIT_ACCT}}, amountGross:AMOUNT, amountGrossCurrency:AMOUNT, date:"{today}", row:1, vatType:{{id:0}}}},
-     {{account:{{id:CREDIT_ACCT}}, amountGross:-AMOUNT, amountGrossCurrency:-AMOUNT, date:"{today}", row:2, vatType:{{id:0}}}}
-   ]}}
-RULES:
-- Postings MUST balance (sum of amountGross = 0)
-- Use amountGross (positive=debit, negative=credit), NOT debitAmount/creditAmount
-- "row" field REQUIRED on each posting (1, 2, 3...)
-- "date" field REQUIRED on EACH posting (same as voucher date)
-- vatType {{id:0}} = no VAT handling (for manual journal entries)
-- Customer accounts (1500-1599) require customer:{{id:X}} in the posting
-- Supplier accounts (2400): require supplier:{{id:X}} on the posting
+── VOUCHER ──
+POST /ledger/voucher {{date:"YYYY-MM-DD", description:"...", postings:[
+  {{account:{{id:X}}, amountGross:AMT, amountGrossCurrency:AMT, date:"YYYY-MM-DD", row:1, vatType:{{id:0}}}},
+  {{account:{{id:Y}}, amountGross:-AMT, amountGrossCurrency:-AMT, date:"YYYY-MM-DD", row:2, vatType:{{id:0}}}}
+]}}
+Rules: postings balance to 0. row+date REQUIRED per posting. Customer accts (1500s) need customer:{{id:X}}. Supplier accts (2400) need supplier:{{id:X}}.
 
 ── ACCOUNTING DIMENSIONS ──
-1. POST /ledger/accountingDimensionName {{dimensionName:"...", description:"..."}}
-   Response contains dimensionIndex (auto-assigned)
-2. POST /ledger/accountingDimensionValue {{displayName:"...", number:1, dimensionIndex:X}} (for each value)
-3. Link voucher posting to dimension: freeAccountingDimension1:{{id:VALUE_ID}} (for dimensionIndex 1)
-   NEVER use "dimensions", "dimension1", or "accountingDimensionValue" on postings
+POST /ledger/accountingDimensionName {{dimensionName:"...", description:"..."}} → get dimensionIndex
+POST /ledger/accountingDimensionValue {{displayName:"...", number:1, dimensionIndex:X}}
+Link to posting: freeAccountingDimension1:{{id:VALUE_ID}}
 
 ── SUPPLIER INVOICE / INCOMING INVOICE ──
-IMPORTANT: /incomingInvoice and /supplierInvoice do NOT have POST. Use voucher ONLY!
+IMPORTANT: /incomingInvoice and /supplierInvoice do NOT have POST (BETA = 403). Use voucher ONLY!
 Step 1: Create supplier: POST /supplier {{name, organizationNumber, email, phoneNumber}}
 Step 2: Look up expense account: GET /ledger/account?number=EXPENSE_ACCT&fields=id,number,name
-   (only if NOT in LEDGER ACCOUNT IDS context — if account number is 5000/1920/2780/2710/2400, use ID from context!)
-Step 3: Calculate: EXCL_VAT = INCL_VAT / 1.25, VAT = INCL_VAT - EXCL_VAT
-Step 4: POST /ledger/voucher {{date:"{today}", description:"Leverandørfaktura [INV_NUMBER] [SUPPLIER_NAME]", postings:[
-     {{account:{{id:EXPENSE_ACCT_ID}}, amountGross:EXCL_VAT, amountGrossCurrency:EXCL_VAT, date:"{today}", row:1, vatType:{{id:0}}}},
-     {{account:{{id:ACCT_2710_ID}}, amountGross:VAT, amountGrossCurrency:VAT, date:"{today}", row:2, vatType:{{id:0}}}},
-     {{account:{{id:ACCT_2400_ID}}, amountGross:-INCL_VAT, amountGrossCurrency:-INCL_VAT, date:"{today}", row:3, vatType:{{id:0}}, supplier:{{id:SUPPLIER_ID}}}}
+   (skip if in LEDGER ACCOUNT IDS context: 5000/1920/2780/2710/2400/6300/6500/7100/7300/7350)
+Step 3: POST /ledger/voucher with AUTOMATIC VAT — only 2 postings:
+   {{date:"{today}", description:"Leverandørfaktura [INV_NUMBER] [SUPPLIER_NAME]", postings:[
+     {{account:{{id:EXPENSE_ACCT_ID}}, amountGross:AMOUNT_INCL_VAT, amountGrossCurrency:AMOUNT_INCL_VAT, date:"{today}", row:1, vatType:{{id:1}}}},
+     {{account:{{id:ACCT_2400_ID}}, amountGross:-AMOUNT_INCL_VAT, amountGrossCurrency:-AMOUNT_INCL_VAT, date:"{today}", row:2, vatType:{{id:0}}, supplier:{{id:SUPPLIER_ID}}}}
    ]}}
-   Use ACCT_2710_ID and ACCT_2400_ID from LEDGER ACCOUNT IDS in context.
-   NEVER try POST /incomingInvoice or POST /supplierInvoice — they will fail!
+   vatType {{id:1}} = "Fradrag inngående avgift 25%" — Tripletex auto-posts MVA to 2710!
+   amountGross = TOTAL including VAT (Tripletex splits automatically)
+   NEVER try POST /incomingInvoice or POST /supplierInvoice — they are BETA and will 403!
 
-── UPDATE EXISTING RESOURCE ──
-1. GET /resource?fields=id,name,version (search)
-2. GET /resource/ID?fields=* (get full object with version)
-3. PUT /resource/ID {{...updated fields..., version:V}}
+── UPDATE/DELETE ──
+Update: GET /resource?fields=id,version → PUT /resource/ID {{...fields, version:V}}
+Delete: GET /resource → DELETE /resource/ID
 
-── DELETE RESOURCE ──
-1. GET /resource?fields=id,name (search)
-2. DELETE /resource/ID
+── RECEIPT/EXPENSE VOUCHER (from image/PDF) ──
+Account mapping: 6500=kontorrekvisita, 7350=representasjon, 7100=bil, 7140=reise, 6900=telefon, 6300=leie, 6340=lys, 7700=annen drift
+POST /ledger/voucher {{date:RECEIPT_DATE, description:"...", postings:[
+  {{account:{{id:EXPENSE}}, amountGross:TOTAL_INCL_VAT, amountGrossCurrency:TOTAL_INCL_VAT, date:RECEIPT_DATE, row:1, vatType:{{id:1}}, department:{{id:DEPT}}}},
+  {{account:{{id:ACCT_1920}}, amountGross:-TOTAL_INCL_VAT, amountGrossCurrency:-TOTAL_INCL_VAT, date:RECEIPT_DATE, row:2, vatType:{{id:0}}}}
+]}}
+vatType id:1="inngående 25%" (auto-splits to 2710). Use RECEIPT DATE not today! Food: vatType id:11 (15%).
 
-═══ RECEIPT / EXPENSE VOUCHER (from image/PDF) ═══
-When prompt mentions a receipt ("kvittering", "Quittung", "recibo", "reçu"):
-1. Read the receipt image/PDF — extract: amount, description, date, VAT
-2. Find correct expense account from LEDGER ACCOUNT IDS in context. Common accounts:
-   7350 = Representasjon (forretningslunsj, middag med kunder)
-   7100 = Bilkostnader
-   7140 = Reisekostnad
-   6300 = Leie lokale
-   6340 = Lys, varme
-   6500 = Kontorrekvisita
-   6700 = Regnskap/revisjon
-   6800 = Kontorrekvisita
-   6900 = Telefon/internett
-   7300 = Salgskostnad
-   7400 = Kontingenter
-   7700 = Annen driftskostnad
-3. If department mentioned: find or create department, link via posting
-4. POST /ledger/voucher with postings:
-   - expense account (debit): amount excl VAT
-   - account 2710 (debit): VAT amount (if 25% MVA)
-   - account 1920 (kredit): -total amount incl VAT
-   For 25% MVA: excl = total/1.25, VAT = total - excl
-   CRITICAL: Use vatType {{id:0}} on all postings (manual handling)
-   If department: add department:{{id:X}} on the expense posting
-
-═══ BETA ENDPOINTS (will always 403 — NEVER use!) ═══
+═══ BETA (always 403) ═══
 POST /incomingInvoice, PUT /project/{{id}}, POST /project/orderline, POST /project/participant, DELETE /project
-Use voucher fallback for supplier invoices. Use POST /project to set all fields at creation time.
 
 ═══ ERROR HANDLING ═══
 - 422: Read validationMessages, fix the field. Product duplicate → GET /product?number=XXXX, use existing ID.
@@ -878,11 +790,11 @@ async def solve(request: Request):
     log.info(f"Detected task type: {task_type}")
 
     # Set iteration limit based on task type
-    max_iterations = 25
+    max_iterations = 20
     if task_type in ("salary", "supplier_invoice", "receipt_voucher", "year_end", "analysis", "employee_pdf"):
-        max_iterations = 25  # Complex tasks need more iterations
+        max_iterations = 20  # Complex tasks
     else:
-        max_iterations = 15  # Simple tasks should finish fast for efficiency
+        max_iterations = 12  # Simple tasks — finish fast for efficiency bonus
 
     # Setup session with larger connection pool
     base_url = creds["base_url"].rstrip("/")
@@ -945,7 +857,7 @@ async def solve(request: Request):
     # Agent loop
     messages = [{"role": "user", "content": content_blocks}]
     trace = []
-    deadline = start_time + 270  # 30s buffer before 300s timeout
+    deadline = start_time + 240  # 60s buffer before 300s timeout
 
     for iteration in range(max_iterations):
         if time.time() > deadline:

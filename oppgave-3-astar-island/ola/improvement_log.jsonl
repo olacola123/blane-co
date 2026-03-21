@@ -1,0 +1,6 @@
+{"iteration": 1, "timestamp": "2026-03-21T00:16:57", "new_rounds": 9, "best_alpha": 8, "best_score": 58.849225046120125, "current_alpha": 15.0}
+{"iteration": 5, "timestamp": "2026-03-21T00:57:06", "new_rounds": 1, "best_alpha": 8, "best_score": 58.19686449574792, "current_alpha": 8}
+{"iteration": 25, "timestamp": "2026-03-21T04:17:18", "new_rounds": 1, "best_alpha": 8, "best_score": 58.19686449574792, "current_alpha": 8}
+{"iteration": 43, "timestamp": "2026-03-21T07:17:35", "new_rounds": 1, "best_alpha": 8, "best_score": 59.07386923506107, "current_alpha": 15.0}
+{"iteration": 1, "timestamp": "2026-03-21T08:32:07", "new_rounds": 12, "best_alpha": 12, "best_score": 58.96298862613514, "current_alpha": 15.0}
+{"iteration": 1, "timestamp": "2026-03-21T08:32:14", "new_rounds": 12, "best_alpha": 12, "best_score": 58.96298862613514, "current_alpha": 15.0}

@@ -1,11 +1,14 @@
 """
-Ola's Astar Island Solver v5 — Selvforbedrende
-=================================================
-Forbedringer over v4:
-1. Settlement-attributter (food/pop/wealth) som prediktor
-2. Adaptiv alpha (lærer optimal verdi fra forrige runder)
-3. Spatial smoothing (naboceller informerer hverandre)
-4. Rundetype-matching mot historikk
+Ola's Astar Island Solver v6 — Optimal observation + type detection
+=====================================================================
+Forbedringer over v5:
+1. 4-type detection: DEAD/STABLE/BOOM_SPREAD/BOOM_CONC (n_settlements + survival)
+2. Joakim-inspirert alpha decay (3.5 → 0.85 → 0.35 → 0.15)
+3. Continuous blending fra blending.py (eliminerer cliff ved type-grenser)
+4. Kontinuerlig cross-seed (oppdateres etter hver seed, ikke bare på slutten)
+5. Prior-only safety submit (kan resubmitte med obs)
+6. Entropy-vektet query plassering (hybrid settlement + entropy)
+7. Adaptiv floor: skarpere (0.002) for observerte/statiske, bredere (0.008) for usikre
 
 Bruk:
     export API_KEY='din-jwt-token'
@@ -36,9 +39,11 @@ API_KEY = os.environ.get("API_KEY", "")
 MAP_W, MAP_H = 40, 40
 NUM_CLASSES = 6
 MAX_VIEWPORT = 15
-PROB_FLOOR = 0.003      # standard floor for mulige klasser
-NEAR_ZERO = 0.0001     # floor for umulige klasser (mountain på slette, port innland)
-DEFAULT_ALPHA = 15.0
+PROB_FLOOR = 0.005      # standard floor per klasse
+SHARP_FLOOR = 0.002     # floor for observerte/statiske celler (mer confidence)
+WIDE_FLOOR = 0.008      # floor for uobserverte usikre celler
+NEAR_ZERO = 0.003       # floor for umulige klasser (port innland, mountain på slette)
+DEFAULT_ALPHA = 3.5     # Joakim-inspirert: lavere prior-styrke → obs teller mer
 
 TERRAIN_TO_CLASS = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 0, 11: 0}
 DISTANCE_BANDS = [0, 1, 2, 3, 5, 8, 12, 99]
@@ -51,11 +56,13 @@ FALLBACK_PRIOR = {
     "1":  [0.462, 0.293, 0.004, 0.026, 0.214, 0.0001],
     "2":  [0.484, 0.089, 0.173, 0.022, 0.231, 0.0001],
     "3":  [0.224, 0.158, 0.084, 0.337, 0.197, 0.0001],
-    "4":  [0.079, 0.127, 0.009, 0.013, 0.772, 0.0001],
+    "4":  [0.096, 0.152, 0.009, 0.018, 0.724, 0.0001],
     "5":  [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.9996],
 }
 
 CALIBRATION_FILE = Path(__file__).parent / "calibration_data.json"
+CALIBRATION_BY_TYPE_FILE = Path(__file__).parent / "calibration_by_type.json"
+CALIBRATION_4TYPE_FILE = Path(__file__).parent / "calibration_4type.json"
 LEARNING_FILE = Path(__file__).parent / "learning_state.json"
 
 
@@ -70,6 +77,27 @@ def load_calibration():
     simple_prior = data.get("simple_prior", {})
     print(f"Lastet kalibrering fra {data.get('num_rounds', '?')} runder, {data.get('num_seeds', '?')} seeds")
     return transition_table, simple_prior
+
+
+def load_calibration_by_type():
+    """Last type-spesifikke calibration-tabeller. Foretrekker 4-type (DEAD/STABLE/BOOM_SPREAD/BOOM_CONC)."""
+    # Foretrekk 4-type calibration
+    if CALIBRATION_4TYPE_FILE.exists():
+        data = json.loads(CALIBRATION_4TYPE_FILE.read_text())
+        tables = data.get("tables", {})
+        if tables:
+            # Map BOOM_SPREAD/BOOM_CONC til BOOMING for blending.py-kompatibilitet
+            # men behold originale nøkler for direkte oppslag
+            print(f"Lastet 4-type tabeller: {', '.join(f'{k}({len(v)} keys)' for k, v in tables.items())}")
+            return tables
+
+    if not CALIBRATION_BY_TYPE_FILE.exists():
+        return None
+    data = json.loads(CALIBRATION_BY_TYPE_FILE.read_text())
+    tables = data.get("tables", {})
+    if tables:
+        print(f"Lastet 3-type tabeller: {', '.join(f'{k}({len(v)} keys)' for k, v in tables.items())}")
+    return tables
 
 
 def load_learning_state():
@@ -154,16 +182,30 @@ def is_coastal(grid, y, x):
                     return True
     return False
 
-def get_prior(terrain, band, coastal, transition_table, simple_prior):
+def get_prior(terrain, band, coastal, transition_table, simple_prior, typed_table=None):
+    """Hent prior. Hvis typed_table (DEAD/STABLE/BOOMING) er gitt, bruk den først."""
+    key = f"{terrain}_{band}_{int(coastal)}"
+    key_nc = f"{terrain}_{band}_0"
+
+    # Prioritet 1: Type-spesifikk tabell (best match for denne runden)
+    if typed_table:
+        if key in typed_table:
+            return np.array(typed_table[key]["distribution"], dtype=float)
+        if key_nc in typed_table:
+            return np.array(typed_table[key_nc]["distribution"], dtype=float)
+
+    # Prioritet 2: Generell calibration (gjennomsnitt over alle runder)
     if transition_table:
-        key = f"{terrain}_{band}_{int(coastal)}"
         if key in transition_table:
             return np.array(transition_table[key]["distribution"], dtype=float)
-        key_nc = f"{terrain}_{band}_0"
         if key_nc in transition_table:
             return np.array(transition_table[key_nc]["distribution"], dtype=float)
+
+    # Prioritet 3: Simple prior per terrengtype
     if simple_prior and str(terrain) in simple_prior:
         return np.array(simple_prior[str(terrain)], dtype=float)
+
+    # Prioritet 4: Hardkodet fallback
     if str(terrain) in FALLBACK_PRIOR:
         return np.array(FALLBACK_PRIOR[str(terrain)], dtype=float)
     return np.ones(NUM_CLASSES, dtype=float) / NUM_CLASSES
@@ -246,8 +288,9 @@ def spatial_smooth(pred, static_mask, sigma=0.7):
     sums = np.maximum(sums, 1e-10)
     smoothed /= sums
 
-    # Floor
-    smoothed = np.maximum(smoothed, PROB_FLOOR)
+    # Floor via linear mixing
+    eps = PROB_FLOOR
+    smoothed = smoothed * (1 - NUM_CLASSES * eps) + eps
     smoothed /= smoothed.sum(axis=2, keepdims=True)
 
     return smoothed
@@ -256,7 +299,8 @@ def spatial_smooth(pred, static_mask, sigma=0.7):
 # === OBSERVATION STORE ===
 
 class SeedObserver:
-    def __init__(self, initial_grid, settlements, transition_table, simple_prior, alpha=DEFAULT_ALPHA):
+    def __init__(self, initial_grid, settlements, transition_table, simple_prior,
+                 alpha=DEFAULT_ALPHA, typed_table=None, type_tables=None, vitality=0.5):
         self.grid = np.array(initial_grid, dtype=int)
         self.settlements = settlements
         self.transition_table = transition_table
@@ -295,14 +339,25 @@ class SeedObserver:
                 if self.static_mask[y, x]:
                     continue
                 terrain, band, coastal = cell_key(grid_list, y, x, settlements)
-                self._prior_cache[y, x] = get_prior(
-                    terrain, band, coastal, transition_table, simple_prior
-                )
-                # BUG 1 FIX B: Klasse-spesifikke floors
-                # Mountain umulig på ikke-fjell-celler
+                # Bruk blended prior hvis type_tables er tilgjengelig
+                if type_tables:
+                    from blending import get_blended_prior
+                    self._prior_cache[y, x] = get_blended_prior(
+                        terrain, band, coastal, type_tables, vitality,
+                        transition_table=transition_table,
+                        simple_prior=simple_prior,
+                        fallback_prior=FALLBACK_PRIOR,
+                    )
+                else:
+                    self._prior_cache[y, x] = get_prior(
+                        terrain, band, coastal, transition_table, simple_prior,
+                        typed_table=typed_table
+                    )
+                # Klasse-spesifikke constraints
+                # Mountain umulig på dynamiske celler
                 self._floor_cache[y, x, 5] = NEAR_ZERO
-                # Port umulig på innlandsceller
                 if not self.coastal_mask[y, x]:
+                    # Port umulig innland
                     self._floor_cache[y, x, 2] = NEAR_ZERO
 
     def add_observation(self, grid_data, viewport_x, viewport_y):
@@ -315,25 +370,21 @@ class SeedObserver:
                     self.observed[y, x] += 1
 
     def add_settlement_obs(self, settlements_data):
-        """[FORBEDRING 1] Bruk settlement-attributter som signal."""
-        for s in settlements_data:
-            x, y = s.get("x", -1), s.get("y", -1)
-            if not (0 <= x < MAP_W and 0 <= y < MAP_H):
-                continue
+        """Settlement-attributter (DEAKTIVERT — marginal effekt, legger til risiko)."""
+        pass
 
-            signal, confidence = settlement_survival_signal(s)
-
-            # Blend settlement-signal inn i prior (ikke obs counts)
-            current_prior = self._prior_cache[y, x]
-            blended = (1 - confidence * 0.3) * current_prior + confidence * 0.3 * signal
-            np.maximum(blended, self._floor_cache[y, x], out=blended)
-            blended /= blended.sum()
-            self._prior_cache[y, x] = blended
-
-    def build_prediction(self, apply_smoothing=True):
-        """Bayesiansk posterior med adaptiv alpha + spatial smoothing."""
+    def build_prediction(self, apply_smoothing=True, world_type=None):
+        """Bayesiansk posterior med Joakim-inspirert alpha-decay + type-spesifikk floor."""
         pred = np.zeros((MAP_H, MAP_W, NUM_CLASSES), dtype=float)
         alpha = self.alpha
+
+        # Type-spesifikk floor: DEAD er sikker (lav floor), BOOM_CONC usikker (høy floor)
+        if world_type == "DEAD":
+            base_floor = 0.002
+        elif world_type == "BOOM_CONC":
+            base_floor = 0.008
+        else:
+            base_floor = 0.005
 
         for y in range(MAP_H):
             for x in range(MAP_W):
@@ -350,28 +401,31 @@ class SeedObserver:
                 if n_obs == 0:
                     pred[y, x] = prior.copy()
                 else:
-                    # [FORBEDRING 2] Adaptiv alpha fra learning state
-                    if n_obs >= 10:
-                        a = alpha * 0.33
-                    elif n_obs >= 5:
-                        a = alpha * 0.53
-                    elif n_obs >= 3:
-                        a = alpha * 0.80
+                    # Joakim-inspirert decay: 1obs=54%, 2obs=85%, 3obs=95%
+                    if n_obs >= 3:
+                        a = 0.15
+                    elif n_obs >= 2:
+                        a = 0.35
                     else:
-                        a = alpha
+                        a = 0.85
 
                     pred[y, x] = self.counts[y, x] + a * prior
 
-                # BUG 1+4 FIX: Normaliser FØRST, klasse-spesifikk floor ETTER
+                # Normaliser
                 s = pred[y, x].sum()
                 if s > 0:
                     pred[y, x] /= s
-                np.maximum(pred[y, x], self._floor_cache[y, x], out=pred[y, x])
-                pred[y, x] /= pred[y, x].sum()
 
-        # [FORBEDRING 3] Spatial smoothing
-        if apply_smoothing:
-            pred = spatial_smooth(pred, self.static_mask)
+                # Floor: observerte celler får skarpere floor
+                if n_obs >= 2:
+                    eps = base_floor * 0.5  # halvparten av base
+                elif n_obs >= 1:
+                    eps = base_floor
+                else:
+                    eps = base_floor
+
+                pred[y, x] = pred[y, x] * (1 - NUM_CLASSES * eps) + eps
+                pred[y, x] /= pred[y, x].sum()
 
         return pred
 
@@ -412,7 +466,9 @@ def apply_cross_seed(observers, cross_table, calibration_table):
                     cross_dist = np.array(cross_table[key]["distribution"])
                     cross_n = cross_table[key]["sample_count"]
                     hist_prior = obs._prior_cache[y, x]
-                    cross_weight = min(0.5, cross_n / 100.0)
+                    # Aggressiv cross-seed: dette ER round-spesifikk data
+                    # 10 obs = 25%, 30 obs = 60%, 50+ obs = 80%
+                    cross_weight = min(0.80, cross_n / 50.0)
                     blended = (1 - cross_weight) * hist_prior + cross_weight * cross_dist
                     # BUG 3 FIX: Klasse-spesifikk floor (ikke uniform)
                     np.maximum(blended, obs._floor_cache[y, x], out=blended)
@@ -422,49 +478,40 @@ def apply_cross_seed(observers, cross_table, calibration_table):
 
 # === [FORBEDRING 4] RUNDETYPE-MATCHING ===
 
-def infer_round_type(observers):
-    """Analyser observasjoner for å gjette rundetype."""
-    total_counts = np.zeros(NUM_CLASSES, dtype=float)
-    total_cells = 0
-    for obs in observers:
-        for y in range(MAP_H):
-            for x in range(MAP_W):
-                if obs.static_mask[y, x] or obs.observed[y, x] == 0:
-                    continue
-                total_counts += obs.counts[y, x]
-                total_cells += obs.observed[y, x]
-
-    if total_cells < 50:
-        return {"settlement": 1.0, "forest": 1.0, "ruin": 1.0, "port": 1.0}
-
-    fracs = total_counts / total_cells
-    hist = {"settlement": 0.12, "forest": 0.13, "ruin": 0.015, "port": 0.01}
-
-    def clamp(v): return max(0.5, min(2.0, v))
-
-    factors = {
-        "settlement": clamp(fracs[1] / hist["settlement"]) if hist["settlement"] > 0 else 1.0,
-        "forest": clamp(fracs[4] / hist["forest"]) if hist["forest"] > 0 else 1.0,
-        "ruin": clamp(fracs[3] / hist["ruin"]) if hist["ruin"] > 0 else 1.0,
-        "port": clamp(fracs[2] / hist["port"]) if hist["port"] > 0 else 1.0,
-    }
-    return factors
+def infer_vitality(observers):
+    """
+    Inferér world vitality fra observasjoner (continuous).
+    Uses piecewise linear mapping fra blending.py.
+    Returns: float 0.0 (dead) til 1.0 (booming)
+    """
+    from blending import infer_vitality_continuous
+    return infer_vitality_continuous(observers)
 
 
-def adjust_priors_for_round(observers, factors):
-    """Juster priors basert på inferert rundetype."""
-    class_factors = np.array([1.0, factors["settlement"], factors["port"],
-                              factors["ruin"], factors["forest"], 1.0])
-    for obs in observers:
-        for y in range(MAP_H):
-            for x in range(MAP_W):
-                if obs.static_mask[y, x]:
-                    continue
-                prior = obs._prior_cache[y, x].copy()
-                prior *= class_factors
-                prior = np.maximum(prior, PROB_FLOOR)
-                prior /= prior.sum()
-                obs._prior_cache[y, x] = prior
+def classify_world_type(seeds_data, vitality):
+    """
+    4-type klassifisering: DEAD / STABLE / BOOM_SPREAD / BOOM_CONC.
+    Bruker vitality (fra observasjoner) + n_settlements (gratis fra initial data).
+
+    Nøkkel-innsikt: n_settlements >= 40 → BOOM_CONC (konsentrert, kort rekkevidde)
+    """
+    n_settlements = len(seeds_data[0].get("settlements", []))
+
+    if vitality < 0.20:
+        return "DEAD", n_settlements
+    elif vitality < 0.55:
+        return "STABLE", n_settlements
+    else:
+        # Booming — skill spread vs concentrated
+        if n_settlements >= 40:
+            return "BOOM_CONC", n_settlements
+        else:
+            return "BOOM_SPREAD", n_settlements
+
+
+def adjust_priors_for_vitality(observers, vitality):
+    """DEPRECATED — blending.py handles this via get_blended_prior()."""
+    pass  # Replaced by continuous blending in v6
 
 
 # === QUERY PLANNER ===
@@ -489,17 +536,33 @@ def build_dynamism_heatmap(initial_grid, settlements):
     return heatmap
 
 
-def plan_queries(initial_grid, settlements, n_queries=10):
+def plan_queries(initial_grid, settlements, n_queries=10, entropy_map=None):
+    """
+    Plan viewport placements med hybrid settlement + entropy heuristikk.
+    Første 2 queries: maks settlement-dekning (for type detection).
+    Resten: balanse mellom settlement-nærhet og entropi (usikkerhet).
+    """
     heatmap = build_dynamism_heatmap(initial_grid, settlements)
+
+    # Legg til entropy-komponent hvis tilgjengelig
+    if entropy_map is not None:
+        # Normaliser entropy til 0-1
+        e_max = entropy_map.max()
+        if e_max > 0:
+            norm_entropy = entropy_map / e_max
+            heatmap = 0.6 * heatmap + 0.4 * norm_entropy * heatmap.max()
+
     viewports = []
     obs_count = np.zeros((MAP_H, MAP_W), dtype=int)
-    for _ in range(n_queries):
+    for q in range(n_queries):
+        # Sterkere overlap-penalty etter de første 2 queries
+        overlap_penalty = 0.20 if q < 2 else 0.50
         best_score, best_vp = -1, (0, 0)
         for vy in range(0, MAP_H - MAX_VIEWPORT + 1, 2):
             for vx in range(0, MAP_W - MAX_VIEWPORT + 1, 2):
                 rh = heatmap[vy:vy+MAX_VIEWPORT, vx:vx+MAX_VIEWPORT]
                 ro = obs_count[vy:vy+MAX_VIEWPORT, vx:vx+MAX_VIEWPORT]
-                score = (rh / (1.0 + 0.35 * ro)).sum()
+                score = (rh / (1.0 + overlap_penalty * ro)).sum()
                 if score > best_score:
                     best_score, best_vp = score, (vx, vy)
         vx, vy = best_vp
@@ -545,53 +608,253 @@ def solve_seed(client, round_id, seed_index, seed_data, transition_table,
 
 
 def solve_round(client, round_id, round_data, transition_table, simple_prior,
-                queries_per_seed=10, submit=True, alpha=DEFAULT_ALPHA):
+                queries_per_seed=10, submit=True, alpha=DEFAULT_ALPHA,
+                type_tables=None, safety_submit=True):
+    """
+    Optimal round-solving strategy v6.
+
+    Faser:
+    1. SAFETY: Submit prior-only for alle seeds (sikkerhetsnett ~74)
+    2. PROBE: Observer seed 0-1 (2 queries each), inferér 4-type
+    3. TYPE-AWARE: Rebuild alle observers med blended priors
+    4. OBSERVE: Observer seed 0-4 med type-spesifikke priors + entropy
+    5. CROSS-SEED: Kontinuerlig cross-seed learning etter hver seed
+    6. RESUBMIT: Alle seeds med observasjoner
+    """
     seeds_data = round_data.get("seeds", round_data.get("initial_states", []))
     if not seeds_data:
         print(f"FEIL: Ingen seeds.")
         return []
 
     n_seeds = len(seeds_data)
-    print(f"\n{n_seeds} seeds (alpha={alpha:.1f})")
+    n_settlements_s0 = len(seeds_data[0].get("settlements", []))
+    print(f"\n{n_seeds} seeds, {n_settlements_s0} initial settlements (alpha={alpha:.1f})")
 
-    # Fase 1: Observer alle seeds
+    # === FASE 1: SAFETY SUBMIT (prior-only) ===
+    prior_scores = []
+    if safety_submit and submit:
+        print("\n  FASE 1: Prior-only safety submit...")
+        for si in range(n_seeds):
+            sd = seeds_data[si]
+            grid = sd.get("grid", [])
+            settlements = sd.get("settlements", [])
+            obs = SeedObserver(grid, settlements, transition_table, simple_prior, alpha=alpha)
+            pred = obs.build_prediction(apply_smoothing=False)
+            try:
+                resp = client.submit(round_id, si, pred.tolist())
+                score = resp.get("score", resp.get("seed_score", "?"))
+                prior_scores.append(score)
+                print(f"    Seed {si} prior-only → {score}")
+                time.sleep(0.4)
+            except Exception as e:
+                print(f"    Seed {si} prior submit FEIL: {e}")
+                prior_scores.append(None)
+
+    # === FASE 2: PROBE — Observer seed 0-1 for type detection ===
+    print("\n  FASE 2: Type detection (seed 0-1, 2 queries each)...")
+    probe_observers = []
+    for si in range(min(2, n_seeds)):
+        sd = seeds_data[si]
+        grid = sd.get("grid", [])
+        settlements = sd.get("settlements", [])
+        obs = SeedObserver(grid, settlements, transition_table, simple_prior, alpha=alpha)
+
+        # 2 queries for probing — plassert over settlement-klynger
+        viewports = plan_queries(grid, settlements, n_queries=2)
+        for i, (vx, vy, vw, vh) in enumerate(viewports):
+            try:
+                result = client.simulate(round_id, si, vx, vy, vw, vh)
+                gd = result.get("grid", [])
+                if gd:
+                    obs.add_observation(gd, vx, vy)
+                used = result.get("queries_used", "?")
+                mx = result.get("queries_max", "?")
+                print(f"    Seed {si} probe Q{i+1}: ({vx},{vy}) → {used}/{mx}")
+                time.sleep(0.25)
+            except Exception as e:
+                print(f"    Seed {si} probe FEIL: {e}")
+        probe_observers.append(obs)
+
+    # Inferér vitality + 4-type
+    vitality = infer_vitality(probe_observers)
+    world_type, n_sett = classify_world_type(seeds_data, vitality)
+    print(f"\n  Vitality: {vitality:.3f} → {world_type} ({n_sett} settlements)")
+
+    # === FASE 3: TYPE-AWARE OBSERVERS ===
+    # Velg type-spesifikk tabell for blending
+    typed_table = None
+    if type_tables:
+        # Direkte match (4-type)
+        if world_type in type_tables:
+            typed_table = type_tables[world_type]
+            print(f"  Bruker {world_type}-tabell ({len(typed_table)} keys)")
+        # Fallback: map BOOM_SPREAD/BOOM_CONC → BOOMING (3-type)
+        elif world_type.startswith("BOOM") and "BOOMING" in type_tables:
+            typed_table = type_tables["BOOMING"]
+            print(f"  Fallback: BOOMING-tabell ({len(typed_table)} keys)")
+
+    # Rebuild alle observers med blended/typed priors
+    # Probe-observers (seed 0-1) beholder sine observasjoner men oppdaterer priors
     observers = []
-    for si, sd in enumerate(seeds_data):
-        obs = solve_seed(client, round_id, si, sd, transition_table, simple_prior,
-                        total_queries=queries_per_seed, alpha=alpha)
+
+    # Bestem queries per seed for resten
+    # Brukt: 2*2 = 4 probe queries. Gjenstår: queries_per_seed*n_seeds - 4
+    total_budget = queries_per_seed * n_seeds
+    remaining_budget = total_budget - 4  # 4 probe queries brukt
+    obs_per_seed = max(6, remaining_budget // n_seeds)  # minimum 6 per seed
+    extra_queries = remaining_budget - obs_per_seed * n_seeds
+
+    print(f"  Query-plan: {obs_per_seed}/seed + {max(0,extra_queries)} ekstra")
+
+    # === FASE 4: OBSERVE ALLE SEEDS ===
+    for si in range(n_seeds):
+        sd = seeds_data[si]
+        grid = sd.get("grid", [])
+        settlements = sd.get("settlements", [])
+
+        if si < len(probe_observers):
+            # Seed 0-1: gjenbruk observer, rebuild priors med typed_table
+            obs = probe_observers[si]
+            if typed_table:
+                # Oppdater prior-cache med type-spesifikke tabeller
+                grid_list = obs.grid.tolist()
+                for y in range(MAP_H):
+                    for x in range(MAP_W):
+                        if obs.static_mask[y, x]:
+                            continue
+                        terrain, band, coastal = cell_key(grid_list, y, x, obs.settlements)
+                        if type_tables and len(type_tables) >= 3:
+                            # Bruk blended prior (smooth interpolation)
+                            from blending import get_blended_prior
+                            obs._prior_cache[y, x] = get_blended_prior(
+                                terrain, band, coastal, type_tables, vitality,
+                                transition_table=transition_table,
+                                simple_prior=simple_prior,
+                                fallback_prior=FALLBACK_PRIOR,
+                            )
+                        else:
+                            obs._prior_cache[y, x] = get_prior(
+                                terrain, band, coastal, transition_table, simple_prior,
+                                typed_table=typed_table,
+                            )
+
+            # Gjenstående queries for seed 0-1 (obs_per_seed - 2 allerede brukt)
+            remaining_for_seed = obs_per_seed - 2
+        else:
+            # Seed 2-4: ny observer med typed priors
+            if type_tables and len(type_tables) >= 3:
+                obs = SeedObserver(grid, settlements, transition_table, simple_prior,
+                                  alpha=alpha, type_tables=type_tables, vitality=vitality)
+            else:
+                obs = SeedObserver(grid, settlements, transition_table, simple_prior,
+                                  alpha=alpha, typed_table=typed_table)
+            remaining_for_seed = obs_per_seed
+
+        print(f"\n  Seed {si}: {len(settlements)} settlements, {remaining_for_seed} queries")
+
+        # Planlegg og observer
+        viewports = plan_queries(grid, settlements, n_queries=remaining_for_seed)
+        for i, (vx, vy, vw, vh) in enumerate(viewports):
+            try:
+                result = client.simulate(round_id, si, vx, vy, vw, vh)
+                gd = result.get("grid", [])
+                if gd:
+                    obs.add_observation(gd, vx, vy)
+                used = result.get("queries_used", "?")
+                mx = result.get("queries_max", "?")
+                print(f"    Q{i+1}: ({vx},{vy}) → {used}/{mx}")
+                time.sleep(0.25)
+            except Exception as e:
+                print(f"    Q{i+1} FEIL: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    status = e.response.status_code
+                    if status == 429:
+                        print(f"    Budget oppbrukt! Stopper queries.")
+                        break
+
         observers.append(obs)
-        time.sleep(0.3)
 
-    # Fase 2: Rundetype-inferens
-    factors = infer_round_type(observers)
-    print(f"\n  Rundetype: sett={factors['settlement']:.2f}× forest={factors['forest']:.2f}× "
-          f"ruin={factors['ruin']:.2f}× port={factors['port']:.2f}×")
-    adjust_priors_for_round(observers, factors)
+        # === FASE 5: KONTINUERLIG CROSS-SEED ===
+        # Oppdater cross-seed etter HVER seed (ikke bare på slutten)
+        if len(observers) >= 2:
+            cross_table = build_cross_seed_prior(observers)
+            if cross_table:
+                n_keys = len(cross_table)
+                total_obs_count = sum(v["sample_count"] for v in cross_table.values())
+                apply_cross_seed(observers, cross_table, transition_table)
+                if si == n_seeds - 1:  # Bare print på siste
+                    print(f"\n  Cross-seed: {n_keys} kategorier, {total_obs_count} obs")
 
-    # Fase 3: Cross-seed learning
-    cross_table = build_cross_seed_prior(observers)
-    if cross_table:
-        n_keys = len(cross_table)
-        total_obs = sum(v["sample_count"] for v in cross_table.values())
-        print(f"  Cross-seed: {n_keys} kategorier, {total_obs} obs")
-        apply_cross_seed(observers, cross_table, transition_table)
-
-    # Fase 4: Submit
+    # === FASE 6: CONDITIONAL RESUBMIT ===
+    print(f"\n  FASE 6: Conditional resubmit (type={world_type})...")
     results = []
     for si, obs in enumerate(observers):
-        pred = obs.build_prediction(apply_smoothing=True)
+        dm = ~obs.static_mask
+        do = (obs.observed[dm] > 0).sum()
+        dt = dm.sum()
+        mo = obs.observed[dm].mean() if dt > 0 else 0
+
+        # Bygg obs-basert prediksjon
+        obs_pred = obs.build_prediction(apply_smoothing=False, world_type=world_type)
+
+        # Bygg prior-only prediksjon (for sammenligning)
+        saved_counts = obs.counts.copy()
+        saved_observed = obs.observed.copy()
+        obs.counts[:] = 0
+        obs.observed[:] = 0
+        prior_pred = obs.build_prediction(apply_smoothing=False, world_type=world_type)
+        obs.counts[:] = saved_counts
+        obs.observed[:] = saved_observed
+
+        # Conditional resubmit: bare resubmit hvis obs bekrefter prior
+        mean_change = np.abs(obs_pred[dm] - prior_pred[dm]).mean()
+        obs_confirms_prior = mean_change < 0.04  # lav endring = obs bekrefter
+
+        if do == 0:
+            # Ingen observasjoner — bruk prior (allerede submittet i fase 1)
+            use_obs = False
+            reason = "ingen obs"
+        elif obs_confirms_prior:
+            # Obs bekrefter prior — trygt å resubmitte (obs gir skarpere prediksjon)
+            use_obs = True
+            reason = f"bekreftet (Δ={mean_change:.3f})"
+        else:
+            # Obs avviker mye — kanskje noisy. Resubmit med forsiktighet.
+            # Blend obs og prior: 60% obs + 40% prior (dempe støy)
+            obs_pred[dm] = 0.6 * obs_pred[dm] + 0.4 * prior_pred[dm]
+            # Renormaliser
+            sums = obs_pred.sum(axis=2, keepdims=True)
+            sums = np.maximum(sums, 1e-10)
+            obs_pred /= sums
+            use_obs = True
+            reason = f"blended (Δ={mean_change:.3f})"
+
+        print(f"  Seed {si}: {do}/{dt} obs, snitt {mo:.1f}/celle → {reason}")
+
         if not submit:
             results.append({"seed_index": si, "status": "no-submit"})
             continue
-        try:
-            resp = client.submit(round_id, si, pred.tolist())
-            score = resp.get("score", resp.get("seed_score", "?"))
-            print(f"  Seed {si} → {score}")
-            results.append({"seed_index": si, "score": score})
-            time.sleep(0.4)
-        except Exception as e:
-            print(f"  Seed {si} submit FEIL: {e}")
-            results.append({"seed_index": si, "error": str(e)})
+
+        if use_obs:
+            try:
+                resp = client.submit(round_id, si, obs_pred.tolist())
+                score = resp.get("score", resp.get("seed_score", "?"))
+                prior_s = prior_scores[si] if si < len(prior_scores) else None
+                diff_str = ""
+                if isinstance(score, (int, float)) and isinstance(prior_s, (int, float)):
+                    diff = score - prior_s
+                    diff_str = f" ({diff:+.1f} vs prior)"
+                print(f"    → {score}{diff_str}")
+                results.append({"seed_index": si, "score": score, "prior_score": prior_s})
+                time.sleep(0.4)
+            except Exception as e:
+                print(f"    submit FEIL: {e}")
+                results.append({"seed_index": si, "error": str(e)})
+        else:
+            prior_s = prior_scores[si] if si < len(prior_scores) else "?"
+            print(f"    → behold prior ({prior_s})")
+            results.append({"seed_index": si, "score": prior_s, "kept_prior": True})
+
     return results
 
 
@@ -611,6 +874,7 @@ def main():
 
     client = AstarClient()
     transition_table, simple_prior = load_calibration()
+    type_tables = load_calibration_by_type()
     learning = load_learning_state()
     alpha = learning.get("alpha", DEFAULT_ALPHA)
 
@@ -661,7 +925,8 @@ def main():
         return
 
     results = solve_round(client, round_id, round_data, transition_table, simple_prior,
-                         queries_per_seed=args.queries, submit=not args.no_submit, alpha=alpha)
+                         queries_per_seed=args.queries, submit=not args.no_submit, alpha=alpha,
+                         type_tables=type_tables, safety_submit=True)
 
     print("\n=== RESULTATER ===")
     scores = []

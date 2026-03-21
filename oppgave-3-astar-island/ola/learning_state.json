@@ -1,0 +1,19 @@
+{
+  "alpha": 6.0,
+  "round_history": [],
+  "obs_helped_count": 0,
+  "obs_hurt_count": 0,
+  "bias_corrections": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "analyzed_rounds": [
+    "runde_11",
+    "runde_12"
+  ],
+  "alpha_locked": true
+}

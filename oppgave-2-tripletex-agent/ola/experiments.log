@@ -1,0 +1,27 @@
+# Autoresearch: Tripletex System Prompt Optimization
+
+## Baseline
+Score: 7/12 (58%) — men eval hadde bug i søk → reelt 8/12 (67%)
+Feilet: supplier (eval-bug), invoice, payment, supplier_es (eval-bug)
+
+## #1: Forbedret faktura/betaling-instruksjoner + eval-fix
+Endring: Tydeligere steg-for-steg for invoice+payment, eksplisitte "DO NOT use" for feil feltnavn
+Baseline: 8/12 → Resultat: 10/12 (83%) (Δ: +25%)
+Status: KEEP ✅
+Nye PASS: supplier, customer_address, supplier_es (2 var eval-bug, 1 ekte fix)
+Fortsatt FAIL: invoice, payment
+
+## #2: Random produktnummer + fikset eval org.nummer
+Endring: Instruksjon om random produktnummer, eval bruker separate 9-sifret org.nr
+Baseline: 10/12 → Resultat: 10/12 (83%) (Δ: 0%)
+Status: KEEP (eval-fix, ingen prompt-endring)
+FAIL: invoice, payment — begge feiler pga "bankkontonummer" i sandbox.
+Sandbox mangler bankkonto og det kan ikke settes via API.
+Konkurranse-kontoer har sannsynligvis bankkonto pre-konfigurert.
+→ Invoice/payment kan ikke testes i sandbox. Må testes med ekte submissions.
+
+## Platå-analyse
+10/12 er sannsynlig tak for sandbox-testing.
+De 2 gjenværende (invoice + payment) er blokkert av sandbox-begrensning.
+Agenten gjør riktige steg (customer → product → order → orderline → invoice) men sandbox mangler bankkonto.
+Stopper autoresearch her — videre forbedring krever ekte submissions eller LLM-bytte.
