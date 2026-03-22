@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
 requests
-anthropic
 pdfplumber
+google-cloud-storage
+anthropic

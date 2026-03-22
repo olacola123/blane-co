@@ -1,7 +1,7 @@
 """
 Tripletex AI Accounting Agent — NM i AI 2026
-v17-speed: Task-specific prompts (15K→2-4K tokens), Haiku for 19 task types,
-           message trimming, tighter deadlines, reduced max_tokens.
+v23-fixes: cost_analysis activityType fix, project_lifecycle GET project activities,
+              salary employee fallback, credit_note better handling.
 """
 
 import base64
@@ -15,35 +15,166 @@ import traceback
 from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 
-import anthropic
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("agent")
 
 app = FastAPI()
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Claude API config
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=1, timeout=60.0)
+USE_CLAUDE = os.environ.get("USE_CLAUDE", "true").lower() == "true"
 
-HAIKU_TASKS = {"customer", "product", "departments", "supplier", "employee",
-               "invoice_send", "payment", "reverse_payment",
-               "credit_note", "contact_person",
-               "travel_expense", "delete_travel",
-               "acct_dimension", "order", "invoice_multi"}
+# Vertex AI config (uses GCP service account — no API key needed on Cloud Run)
+VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "ainm26osl-745")
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
+VERTEX_MODEL = "gemini-2.0-flash-001"  # Stable Vertex AI model name
+
+_gcp_token: str | None = None
+_gcp_token_expiry: float = 0.0
+
+
+def _get_gcp_token() -> str | None:
+    """Get GCP access token from metadata server (available on Cloud Run)."""
+    global _gcp_token, _gcp_token_expiry
+    now = time.time()
+    if _gcp_token and now < _gcp_token_expiry - 60:
+        return _gcp_token
+    try:
+        resp = requests.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            headers={"Metadata-Flavor": "Google"},
+            timeout=3,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            _gcp_token = data["access_token"]
+            _gcp_token_expiry = now + data.get("expires_in", 3600)
+            log.info("Got GCP token via metadata server (Vertex AI available)")
+            return _gcp_token
+    except Exception:
+        pass  # Not on GCP / metadata not available
+    return None
+GEMINI_FALLBACK_MODEL = "gemini-2.0-flash"  # always-free fallback if primary quota exhausted
 
 LOG_PATH = Path(os.environ.get("SUBMISSION_LOG", "/tmp/tripletex_submissions.jsonl"))
+import hashlib
+
+# ── Persistent GCS logging ──
+GCS_BUCKET = "ainm26osl-745-tripletex-logs"
+GCS_LOG_BLOB = "submissions.jsonl"
+
+def _gcs_client():
+    try:
+        from google.cloud import storage
+        return storage.Client()
+    except Exception:
+        return None
+
+def _gcs_append_log(entry_json: str):
+    """Append a log entry to GCS (persistent across deploys)."""
+    try:
+        client = _gcs_client()
+        if not client:
+            return
+        bucket = client.bucket(GCS_BUCKET)
+        # Create bucket if not exists
+        if not bucket.exists():
+            bucket.location = "EUROPE-NORTH1"
+            client.create_bucket(bucket)
+        blob = bucket.blob(GCS_LOG_BLOB)
+        existing = ""
+        if blob.exists():
+            existing = blob.download_as_text()
+        blob.upload_from_string(existing + entry_json + "\n", content_type="text/plain")
+    except Exception as e:
+        log.warning(f"GCS log write failed: {e}")
+
+def _gcs_read_logs() -> list:
+    """Read all log entries from GCS."""
+    try:
+        client = _gcs_client()
+        if not client:
+            return []
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(GCS_LOG_BLOB)
+        if not blob.exists():
+            return []
+        lines = blob.download_as_text().strip().split("\n")
+        return [json.loads(l) for l in lines if l.strip()]
+    except Exception:
+        return []
 
 
 # ═══════════════════════════════════════════════
 # TOOLS — Claude calls these to interact with Tripletex API
 # ═══════════════════════════════════════════════
 
-TOOLS = [
+GEMINI_TOOLS = [{"function_declarations": [
+    {
+        "name": "tripletex_get",
+        "description": "GET request to Tripletex API. Returns JSON response.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "endpoint": {"type": "STRING", "description": "API path, e.g. /employee or /department"},
+                "query_params": {"type": "STRING", "description": "Query string, e.g. 'fields=id,name&count=10'. Empty string if none."},
+            },
+            "required": ["endpoint"],
+        },
+    },
+    {
+        "name": "tripletex_post",
+        "description": "POST request to create a resource. Returns JSON response with created object.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "endpoint": {"type": "STRING", "description": "API path, e.g. /employee"},
+                "body": {"type": "OBJECT", "description": "JSON body to send with all required fields"},
+                "query_params": {"type": "STRING", "description": "Query string. Empty string if none."},
+            },
+            "required": ["endpoint", "body"],
+        },
+    },
+    {
+        "name": "tripletex_put",
+        "description": "PUT request to update a resource or trigger an action. For actions like /:payment, use query_params for parameters (NOT body).",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "endpoint": {"type": "STRING", "description": "API path, e.g. /employee/123 or /invoice/456/:payment"},
+                "body": {"type": "OBJECT", "description": "JSON body (for updates). Empty object {} for actions."},
+                "query_params": {"type": "STRING", "description": "Query string. For actions like /:payment, put params here."},
+            },
+            "required": ["endpoint"],
+        },
+    },
+    {
+        "name": "tripletex_delete",
+        "description": "DELETE request to remove a resource.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "endpoint": {"type": "STRING", "description": "API path with ID, e.g. /travelExpense/789"},
+            },
+            "required": ["endpoint"],
+        },
+    },
+]}]
+
+
+# ═══════════════════════════════════════════════
+# CLAUDE TOOLS — same capabilities, Anthropic format
+# ═══════════════════════════════════════════════
+
+CLAUDE_TOOLS = [
     {
         "name": "tripletex_get",
         "description": "GET request to Tripletex API. Returns JSON response.",
@@ -51,7 +182,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "endpoint": {"type": "string", "description": "API path, e.g. /employee or /department"},
-                "query_params": {"type": "string", "description": "Query string, e.g. 'fields=id,name&count=10'. Empty string if none.", "default": ""},
+                "query_params": {"type": "string", "description": "Query string, e.g. 'fields=id,name&count=10'. Empty string if none."},
             },
             "required": ["endpoint"],
         },
@@ -63,8 +194,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "endpoint": {"type": "string", "description": "API path, e.g. /employee"},
-                "body": {"type": "object", "description": "JSON body to send"},
-                "query_params": {"type": "string", "description": "Query string. Empty string if none.", "default": ""},
+                "body": {"type": "object", "description": "JSON body to send with all required fields"},
+                "query_params": {"type": "string", "description": "Query string. Empty string if none."},
             },
             "required": ["endpoint", "body"],
         },
@@ -76,8 +207,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "endpoint": {"type": "string", "description": "API path, e.g. /employee/123 or /invoice/456/:payment"},
-                "body": {"type": "object", "description": "JSON body (for updates). Empty object {} for actions.", "default": {}},
-                "query_params": {"type": "string", "description": "Query string. For actions like /:payment, put params here.", "default": ""},
+                "body": {"type": "object", "description": "JSON body (for updates). Empty object {} for actions."},
+                "query_params": {"type": "string", "description": "Query string. For actions like /:payment, put params here."},
             },
             "required": ["endpoint"],
         },
@@ -94,6 +225,140 @@ TOOLS = [
         },
     },
 ]
+
+
+def claude_generate(system_prompt, messages, tools=None, max_tokens=1536):
+    """Call Claude API with tool use support. Returns parsed response."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    kwargs = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": max_tokens,
+        "system": system_prompt,
+        "messages": messages,
+    }
+    if tools:
+        kwargs["tools"] = tools
+
+    for attempt in range(3):
+        try:
+            response = client.messages.create(**kwargs)
+            return response
+        except anthropic.RateLimitError:
+            wait = min(30, 2 ** attempt + 2)
+            log.warning(f"Claude 429, waiting {wait}s (attempt {attempt+1})")
+            time.sleep(wait)
+        except anthropic.APIError as e:
+            log.error(f"Claude API error: {e}")
+            return None
+        except Exception as e:
+            log.error(f"Claude request error: {e}")
+            return None
+    return None
+
+
+def claude_extract(system_prompt: str, user_text: str, image_blocks: list = None, max_tokens=1024) -> str:
+    """Single Claude call for data extraction. Returns raw text response."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    content = []
+    if image_blocks:
+        for img in image_blocks:
+            if "inline_data" in img:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img["inline_data"]["mime_type"],
+                        "data": img["inline_data"]["data"],
+                    },
+                })
+    content.append({"type": "text", "text": user_text})
+
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=max_tokens,
+                system=system_prompt or "Extract data as requested. Return ONLY valid JSON.",
+                messages=[{"role": "user", "content": content}],
+            )
+            return response.content[0].text
+        except anthropic.RateLimitError:
+            wait = min(30, 2 ** attempt + 2)
+            log.warning(f"Claude extract 429, waiting {wait}s")
+            time.sleep(wait)
+        except Exception as e:
+            log.error(f"Claude extract error: {e}")
+            return ""
+    return ""
+
+
+def gemini_generate(model, system_prompt, messages, tools=None, max_tokens=1536):
+    """Call Gemini/Vertex AI API. Tries Vertex AI first (service account), falls back to API key."""
+    body = {
+        "contents": messages,
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0.0,
+        },
+    }
+    if system_prompt:
+        body["system_instruction"] = {"parts": [{"text": system_prompt}]}
+    if tools:
+        body["tools"] = tools
+        body["tool_config"] = {"function_calling_config": {"mode": "AUTO"}}
+
+    # Try Vertex AI first (uses GCP service account — no API key needed)
+    token = _get_gcp_token()
+    if token:
+        url = (f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/{VERTEX_PROJECT}"
+               f"/locations/{VERTEX_LOCATION}/publishers/google/models/{VERTEX_MODEL}:generateContent")
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        for attempt in range(3):
+            try:
+                resp = requests.post(url, json=body, headers=headers, timeout=60)
+                if resp.status_code == 429:
+                    wait = min(30, 2 ** attempt + 2)
+                    log.warning(f"Vertex AI 429, waiting {wait}s (attempt {attempt+1})")
+                    time.sleep(wait)
+                    continue
+                if resp.status_code == 401:
+                    global _gcp_token
+                    _gcp_token = None  # Force token refresh on next call
+                    log.warning("Vertex AI 401 — token expired, clearing cache")
+                    break
+                if resp.status_code != 200:
+                    log.error(f"Vertex AI {resp.status_code}: {resp.text[:300]}")
+                    break
+                return resp.json()
+            except Exception as e:
+                log.error(f"Vertex AI request error: {e}")
+                break
+
+    # Fallback: direct Gemini API with API key
+    if not GEMINI_API_KEY:
+        log.error("No Gemini API key and Vertex AI unavailable")
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json=body, timeout=60)
+            if resp.status_code == 429:
+                wait = min(30, 2 ** attempt + 2)
+                log.warning(f"Gemini 429 rate limit, waiting {wait}s (attempt {attempt+1})")
+                time.sleep(wait)
+                continue
+            if resp.status_code != 200:
+                log.error(f"Gemini API {resp.status_code}: {resp.text[:500]}")
+                return None
+            return resp.json()
+        except Exception as e:
+            log.error(f"Gemini request error: {e}")
+            return None
+    return None
 
 
 # ═══════════════════════════════════════════════
@@ -425,10 +690,10 @@ def execute_tool(name: str, input_data: dict, session: requests.Session, base_ur
         log.error(f"{name} {endpoint} → {status_code}: {resp.text[:300]}")
     else:
         log.info(f"{name} {endpoint} → {status_code}")
-        # Track salary/transaction success to prevent duplicate vouchers
-        if "salary/transaction" in endpoint and status_code == 201 and ctx is not None:
+        # Track salary/payslip success to prevent duplicate vouchers
+        if ("salary/transaction" in endpoint or "salary/paySlip" in endpoint) and status_code in (200, 201) and ctx is not None:
             ctx["_salary_transaction_done"] = True
-            log.info("Salary transaction succeeded — blocking future manual salary vouchers")
+            log.info("Salary payslip succeeded — blocking future manual salary vouchers")
 
     try:
         result = resp.json()
@@ -485,22 +750,22 @@ def prefetch_context(session: requests.Session, base_url: str, task_type: str = 
     SALARY_F = [("salary_%s" % n, "salary/type", {"number": str(n), "fields": "id,number,name"}) for n in (2000, 2001, 2002, 2005)]
     COMMON_ACCTS = [("acct_%s" % n, "ledger/account", {"number": str(n), "fields": "id,number,name"}) for n in (1920, 2400, 2710, 3000, 1500)]
     EXPENSE_ACCTS = [("acct_%s" % n, "ledger/account", {"number": str(n), "fields": "id,number,name"}) for n in (5000, 2780, 7100, 7140, 7350, 6300, 6340, 6500, 6700, 6800, 6900, 7300, 7400, 7700, 2600)]
-    YE_ACCTS = [("acct_%s" % n, "ledger/account", {"number": str(n), "fields": "id,number,name"}) for n in (1200, 1209, 1210, 1230, 1240, 1250, 1700, 1710, 1950, 2000, 2050, 2900, 2920, 3400, 4000, 4300, 6010, 6020, 6100, 6200, 6540, 7000, 7500, 8060, 8160, 8300, 8700)]
+    YE_ACCTS = [("acct_%s" % n, "ledger/account", {"number": str(n), "fields": "id,number,name"}) for n in (1200, 1209, 1210, 1230, 1240, 1250, 1700, 1710, 1950, 2000, 2050, 2800, 2900, 2920, 3400, 4000, 4300, 6010, 6020, 6100, 6200, 6540, 7000, 7500, 8060, 8160, 8300, 8700, 8900)]
 
     # ── Task-specific prefetch ──
     W_EMP = {"employee", "employee_pdf", "salary", "travel_expense", "delete_travel",
              "month_end", "year_end", "bank_recon", "ledger_audit", "project_lifecycle",
              "cost_analysis", "timesheet", "acct_dimension", "unknown"}
     W_PROD = {"product", "invoice_send", "invoice_multi", "fx_invoice", "reminder_fee",
-              "payment", "credit_note", "order", "unknown"}
+              "payment", "credit_note", "order", "project_lifecycle", "unknown"}
     W_CUST = {"customer", "contact_person", "invoice_send", "invoice_multi", "fx_invoice",
-              "reminder_fee", "payment", "credit_note", "order", "unknown"}
-    W_SUPP = {"supplier", "supplier_invoice", "supplier_invoice_pdf", "unknown"}
+              "reminder_fee", "payment", "credit_note", "order", "project_lifecycle", "unknown"}
+    W_SUPP = {"supplier", "supplier_invoice", "supplier_invoice_pdf", "project_lifecycle", "unknown"}
     W_SAL = {"salary", "employee_pdf", "month_end", "unknown"}
     W_TRAV = {"travel_expense", "delete_travel", "unknown"}
     W_ACCT = {"supplier_invoice", "supplier_invoice_pdf", "receipt_voucher", "invoice_send",
               "invoice_multi", "fx_invoice", "reminder_fee", "salary", "payment",
-              "credit_note", "reverse_payment", "cost_analysis", "bank_recon", "ledger_audit", "unknown"}
+              "credit_note", "reverse_payment", "cost_analysis", "bank_recon", "ledger_audit", "project_lifecycle", "unknown"}
     W_YE = {"year_end", "month_end", "cost_analysis", "ledger_audit", "bank_recon", "unknown"}
     W_MINIMAL = {"departments", "project", "project_fixed"}
 
@@ -521,7 +786,7 @@ def prefetch_context(session: requests.Session, base_url: str, task_type: str = 
         if task_type in W_CUST or task_type in W_PROD: fetches.extend([F_PT, F_CURR])
         if task_type in W_ACCT: fetches.extend(COMMON_ACCTS + EXPENSE_ACCTS)
         if task_type in W_YE: fetches.extend(YE_ACCTS)
-        if task_type in ("employee", "employee_pdf", "unknown"): fetches.append(F_ACT)
+        if task_type in ("employee", "employee_pdf", "project_lifecycle", "unknown"): fetches.append(F_ACT)
         log.info(f"Task-specific prefetch for {task_type}: {len(fetches)} calls (was always 48+)")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
@@ -736,7 +1001,7 @@ RULES:
 6. Never set "id"/"version" in POST. Prices EXCLUDING VAT unless "inkl. MVA"/"TTC"/"con IVA incluido".
 7. BATCH independent calls in ONE response. Each iteration ≈ 10s. Fewer = faster.
 8. PLAN FIRST: mentally plan ALL steps, group independent ones.
-9. Salary: if /salary/transaction → 201, STOP. No manual voucher.
+9. Salary: use payslip flow (POST paySlip → PUT :calculate → PUT :createPayment). STOP after createPayment. No manual voucher.
 10. Per diem → /travelExpense/perDiemCompensation (NOT /cost).
 11. userType: STANDARD | EXTENDED | NO_ACCESS. NEVER "ADMINISTRATOR".
 
@@ -822,7 +1087,9 @@ departmentNumber must be unique. Use EXISTING DEPARTMENT NUMBERS +1, +2. For 3 d
 {R_EMPLOYMENT}
 ═══ PDF CONTRACT ═══
 Extract ALL from PDF. EVERY field scored!
-1. POST /employee {{{{firstName, lastName, email, dateOfBirth, employeeNumber, nationalIdentityNumber:"11-DIGIT", userType:"STANDARD", department:{{{{id:X}}}}}}}}
+1. POST /employee {{{{firstName, lastName, email:"firstname.lastname@example.org", dateOfBirth, employeeNumber, nationalIdentityNumber:"11-DIGIT", userType:"STANDARD", department:{{{{id:X}}}}}}}}
+   CRITICAL: email MUST be valid format! Use the email from the PDF. If no email in PDF, use firstname.lastname@example.org
+   If POST fails with email validation error, retry WITHOUT email field.
 2. POST /division (if needed) → POST /employment
 3. POST /employment/details {{{{percentageOfFullTimeEquivalent:FROM_PDF}}}}
 4. GET /employee/employment/occupationCode?code=DIGITS → PUT /employee/employment/ID with occupationCode:{{{{id:OCC_ID}}}}
@@ -863,7 +1130,10 @@ PUT /invoice/ID/:payment: paidAmount = sum(prices) × 1.25"""
         return f"""{R_PRODUCT}
 {R_INVOICE_FLOW}
 ═══ CREDIT NOTE ═══
-After creating invoice: PUT /invoice/ID/:createCreditNote query_params: date={today}&sendToCustomer=false"""
+1. Find the invoice: GET /invoice?invoiceDateFrom=2020-01-01&invoiceDateTo=2027-01-01&fields=id,invoiceNumber,amount,amountOutstanding,customer
+2. Create credit note: PUT /invoice/ID/:createCreditNote query_params: date={today}&sendToCustomer=false
+If "Hele eller deler av fakturaen er kreditert" error: the invoice was already credited. Try finding another matching invoice.
+IMPORTANT: First create the ORIGINAL invoice (customer+product+order+orderline+invoice), THEN credit it!"""
 
     elif task_type == "project":
         return f"""{R_EMPLOYEE}
@@ -901,14 +1171,15 @@ GET /travelExpense → if APPROVED: PUT /:unapprove?id=X → DELETE /travelExpen
 {R_EMPLOYMENT}
 {R_VOUCHER}
 ═══ SALARY ═══
-Batch: [PUT employee + POST division] → [employment + standardTime] → [salary/transaction]
+Batch: [PUT employee + POST division] → [employment + standardTime] → [payslip flow]
 1. Find employee by email. PUT with name+dateOfBirth FROM CONTEXT.
 2. If hasEmployment=NO: create division+employment+details. If YES: skip to 3.
 3. POST /employee/standardTime {{{{employee:{{{{id:X}}}}, fromDate:"{today}", hoursPerDay:7.5}}}} (ignore 422)
-4. POST /salary/transaction query_params: generateTaxDeduction=true
-   Body: {{{{date:"{today}", month:{date.today().month}, year:{date.today().year}, payslips:[{{{{employee:{{{{id:X}}}}, date:"{today}", year:{date.today().year}, month:{date.today().month}, specifications:[{{{{salaryType:{{{{id:TYPE_2000}}}}, rate:BASE, count:1, amount:BASE}}}}, {{{{salaryType:{{{{id:TYPE_2002}}}}, rate:BONUS, count:1, amount:BONUS}}}}]}}}}]}}}}
-   If 201 → STOP! If 403/422 → voucher fallback:
-5. POST /ledger/voucher: debit 5000(BASE+BONUS), credit 2780(-(BASE+BONUS)). NEVER use 1920!"""
+4. POST /salary/paySlip — create payslip with employee, date, month, year, and specifications inline:
+   Body: {{{{employee:{{{{id:X}}}}, date:"{today}", year:{date.today().year}, month:{date.today().month}, specifications:[{{{{salaryType:{{{{id:TYPE_2000}}}}, rate:BASE, count:1, amount:BASE}}}}, {{{{salaryType:{{{{id:TYPE_2002}}}}, rate:BONUS, count:1, amount:BONUS}}}}]}}}}
+5. PUT /salary/paySlip/{{{{ID}}}}/:calculate — calculates tax deductions
+6. PUT /salary/paySlip/{{{{ID}}}}/:createPayment — finalizes payroll
+   After step 6 → STOP! Task is COMPLETE."""
 
     elif task_type == "supplier_invoice":
         return f"""{R_VOUCHER}
@@ -938,7 +1209,7 @@ Expense mapping: 6340=IT, 6500=office/rekvisita, 6800=other, 7100=vehicle, 7140=
     elif task_type == "receipt_voucher":
         return f"""{R_VOUCHER}
 ═══ RECEIPT VOUCHER ═══
-Account mapping: 6500=kontorrekvisita, 7350=representasjon, 7100=bil, 7140=reise, 6900=telefon, 6300=leie, 6340=lys, 7700=drift
+Account mapping: 6500=kontorrekvisita, 7350=representasjon, 7100=bil, 7140=reise, 6900=telefon, 6300=leie, 6340=IT/data, 6350=strøm, 6540=inventar/møbler, 7700=drift
 POST /ledger/voucher: debit EXPENSE(vatType:{{{{id:1}}}}, department:{{{{id:DEPT}}}}), credit 1920(vatType:{{{{id:0}}}}).
 vatType 1=ingoing25%. Food: vatType 11(ingoing15%). Use RECEIPT DATE not today!"""
 
@@ -973,7 +1244,9 @@ Full cycle: employees → customer → project → hours → supplier cost → c
 1. For EACH employee: PUT to EXTENDED + entitlements(45+10). Ensure employment.
 2. POST /customer (use existing if org matches)
 3. POST /project. If budget: GET→PUT with isFixedPrice+fixedprice, KEEP original number.
-4. POST /timesheet/entry per employee {{{{project, activity:FROM_CONTEXT, employee, date:"{today}", hours:N}}}}
+4. POST /timesheet/entry per employee {{{{project:{{{{id:PROJ}}}}, activity:{{{{id:ACT}}}}, employee:{{{{id:EMP}}}}, date:"{today}", hours:N}}}}
+   CRITICAL: GET /project/ID?fields=id,projectActivities(id,activity(id,name)) to find valid activity IDs for the project!
+   Use projectActivities[0].activity.id (NOT a random activity from context!)
 5. Supplier cost: voucher debit expense(vatType:1) credit 2400(supplier). Use correct expense acct (4300=subcontractor).
 6. Customer invoice: product→order→orderline→invoice. vatType:{{{{id:3}}}} on both product+orderline."""
 
@@ -991,8 +1264,8 @@ Full cycle: employees → customer → project → hours → supplier cost → c
    POST /employee/entitlement {{{{employee:{{{{id:EMP}}}}, entitlementId:10, customer:{{{{id:{company_id or 'COMPANY_ID'}}}}}}}}}
    CRITICAL: customer field is REQUIRED — use company_id from context!
 7. For each of 3 accounts: POST /project {{{{name:ACCOUNT_NAME, startDate:"{today}", projectManager:{{{{id:EMP}}}}, isInternal:true}}}}
-8. For each project: POST /activity {{{{name:ACCOUNT_NAME, isGeneral:true}}}} — do NOT include activityNumber (field doesn't exist)!
-   Then link: POST /project/projectActivity is NOT available. Use activities from AVAILABLE ACTIVITIES context if possible."""
+8. For each project: POST /activity {{{{name:ACCOUNT_NAME, activityType:"GENERAL_ACTIVITY", isGeneral:true}}}}
+   CRITICAL: activityType is REQUIRED — always use "GENERAL_ACTIVITY"!"""
 
     elif task_type == "year_end":
         return f"""{R_VOUCHER}
@@ -1123,8 +1396,7 @@ def process_files(files: list) -> tuple[list[str], list[dict]]:
                 text_parts.append(f"PDF '{filename}':\n{extracted}")
         elif mime.startswith("image/"):
             image_blocks.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": mime, "data": raw_b64},
+                "inline_data": {"mime_type": mime, "data": raw_b64},
             })
             text_parts.append(f"[Image '{filename}' attached — visible to you]")
 
@@ -1161,19 +1433,19 @@ def detect_task_type(prompt: str) -> str:
         return "fx_invoice"
     if re.search(r'purregebyr|reminder.fee|lembrete.*taxa|mahngebuh?r|taxa.de.lembrete|fatura.vencida.*taxa|overdue.*reminder|forfalt.*faktura.*gebyr|facture.*impayee.*frais|factura.*vencida.*cargo|uberfallige.*rechnung|uberfalliger?.*rechnung', p):
         return "reminder_fee"
-    if re.search(r'arbeidskontrakt|employment.contract|contrato.de.trabajo|arbeitsvertrag|contrat.de.travail|carta.de.oferta|offer.letter|lettre.d.offre|tilbudsbrev|tilbodsbrev|onboarding|integra.+compl|incorpora.+compl', p):
+    if re.search(r'arbeidskontrakt|employment.contract|contrato.de.trabaj|contrato.de.trabalh|arbeitsvertrag|contrat.de.travail|carta.de.oferta|offer.letter|lettre.d.offre|tilbudsbrev|tilbodsbrev|onboarding|integra.+compl|incorpora.+compl|funcionario.*tripletex|crie.*funcionario', p):
         return "employee_pdf"
-    if re.search(r'kvittering|receipt|quittung|recibo|recu|necesitamos.*gasto|gasto.*recibo|besoin.*depense.*recu|depense.*recu|ce recu|dieser quittung|dette kvittering|this receipt|deste recibo|este recibo|comptabiliser.*depense|enregistrer.*depense|depense.*recu', p) and not re.search(r'inv-\d+', p):
+    if re.search(r'kvittering|receipt|quittung|recibo|recu|necesitamos.*gasto|gasto.*recibo|besoin.*depense|depense.*recu|ce recu|dieser quittung|dette kvittering|this receipt|deste recibo|este recibo|comptabiliser.*depense|enregistrer.*depense|depense.*recu|justificatif|cette.*depense|depense.*achat|achat.*nota.*fiscal|nota.*fiscal|bon.*caisse|kassabon|scontrino|kassakvitto|esta depensa|este gasto|diese ausgabe|questa spesa', p) and not re.search(r'inv-\d+', p) and not re.search(r'reise|viaje|viagem|voyage|dienstreise|deplacement|travel', p):
         return "receipt_voucher"
     if re.search(r'(lieferantenrechnung|supplier.invoice|factura.+proveedor|fatura.+fornecedor).*(pdf|beigefugt|attached|adjunt|anexo)', p):
         return "supplier_invoice_pdf"
     # Salary — but NOT if it's actually month-end/year-end with salary accrual
     if re.search(r'lonn|lon\b|payroll|nomina|gehalt|salario|salary', p):
-        if not re.search(r'monatsabschluss|manedsavslut|manadsavslut|manavslutn|month.end|arsoppgjor|year.end|cloture|encerramento|cierre|ruckstellung|avsetjing|avsetting|accrual|periodiser', p):
+        if not re.search(r'monatsabschluss|manedsavslut|manadsavslut|manavslutn|month.end|arsoppgjor|year.end|cloture|encerramento|cierre|ruckstellung|avsetjing|avsetting|accrual|periodiser|contrato.*trabalh|contrato.*trabaj|arbeidskontrakt|employment.contract|arbeitsvertrag|contrat.de.travail|offer.letter|lettre.d.offre|tilbudsbrev|onboarding|pdf.anexo|pdf.ci.joint|vedlagt.pdf|attached.pdf', p):
             return "salary"
     if re.search(r'inv-\d+', p):
         return "supplier_invoice"
-    if re.search(r'reiseregning|travel.expense|despesa.de.viagem|reisekostenabrechnung|note.de.frais', p):
+    if re.search(r'reiseregning|travel.expense|despesa.de.viagem|reisekostenabrechnung|note.de.frais|gastos.de.viaje|nota.*gastos.*viaje|nota.*viaje|informe.*gastos|dietas|viaticos|deplacement|dienstreise', p):
         return "travel_expense"
     if re.search(r'kontaktperson|contact.person|persona.de.contacto|pessoa.de.contato|ansprechpartner', p):
         return "contact_person"
@@ -1203,7 +1475,7 @@ def detect_task_type(prompt: str) -> str:
         return "employee"
     if re.search(r'registr.*leverand|regist.*liefer|regist.*fornecedor|regist.*proveedor|enregistr.*fournisseur', p):
         return "supplier"
-    if re.search(r'opprett.*produkt|create.*product|crie.*produit|crea.*producto|erstellen.*produkt|crie.*produto|enregistr.*produit', p):
+    if re.search(r'opprett.*produkt|create.*product|cr[ée][ez].*produi[ts]|crea.*producto|erstellen.*produkt|enregistr.*produit', p):
         return "product"
     if re.search(r'opprett.*kunde|create.*customer|crie.*cliente|crea.*cliente|erstellen.*kund|creez.*client|enregistr.*client', p):
         return "customer"
@@ -1221,7 +1493,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v17-speed", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v23-fixes", "model": CLAUDE_MODEL if USE_CLAUDE else GEMINI_MODEL, "llm": "claude" if USE_CLAUDE else "gemini"}
 
 
 @app.post("/solve")
@@ -1310,17 +1582,18 @@ async def _solve_inner(body, start_time):
             full_prompt = prompt
             if file_text:
                 full_prompt += f"\n\nAttached files:\n{file_text}"
-            extraction_model = HAIKU_MODEL if task_type in HAIKU_TASKS else CLAUDE_MODEL
             trace = solve_deterministic(
                 task_type, full_prompt, [], session, base_url, ctx,
-                claude_client, extraction_model, start_time, image_blocks
+                GEMINI_API_KEY, GEMINI_MODEL, start_time, image_blocks
             )
-            elapsed = time.time() - start_time
-            total_calls = len(trace)
-            total_errors = sum(1 for t in trace if t.get("status", 200) >= 400)
-            log.info(f"=== DONE {elapsed:.1f}s type={task_type} DETERMINISTIC calls={total_calls} errors={total_errors} ===")
-            _log_run(prompt, files, trace, elapsed)
-            return JSONResponse({"status": "completed"})
+            if trace:
+                elapsed = time.time() - start_time
+                total_calls = len(trace)
+                total_errors = sum(1 for t in trace if t.get("status", 200) >= 400)
+                log.info(f"=== DONE {elapsed:.1f}s type={task_type} DETERMINISTIC calls={total_calls} errors={total_errors} fp={_prompt_fingerprint(prompt)} ===")
+                _log_run(prompt, files, trace, elapsed, task_type)
+                return JSONResponse({"status": "completed"})
+            log.warning(f"Deterministic returned empty trace for {task_type}, falling back to LLM agent")
     except Exception as e:
         log.error(f"Deterministic handler failed for {task_type}: {e}")
         log.error(traceback.format_exc())
@@ -1328,151 +1601,634 @@ async def _solve_inner(body, start_time):
 
     # ═══ LLM AGENT FALLBACK — for unknown tasks or if deterministic fails ═══
 
-    # Build user message with pre-fetched context
+    # Build user message
     user_text = f"Complete this accounting task:\n\n{prompt}"
     if file_text:
         user_text += f"\n\nAttached files:\n{file_text}"
     if ctx_text:
         user_text += f"\n\n═══ PRE-FETCHED SANDBOX DATA ═══\n{ctx_text}"
 
-    content_blocks = [{"type": "text", "text": user_text}]
-    content_blocks.extend(image_blocks)
-
-    # Build system prompt
     system_prompt = build_system_prompt(company_id, task_type)
-
-    # Agent loop
-    messages = [{"role": "user", "content": content_blocks}]
     trace = []
     deadline = start_time + 250  # 50s buffer before 300s timeout
+    tok = 1536 if task_type in COMPLEX_TASKS else 768
 
-    for iteration in range(max_iterations):
-        if time.time() > deadline:
-            log.warning(f"Deadline reached at iteration {iteration}")
-            break
+    if USE_CLAUDE and ANTHROPIC_API_KEY:
+        # ═══ CLAUDE AGENT LOOP ═══
+        log.info("Using Claude agent loop")
 
-        remaining = deadline - time.time()
-        if remaining < 15:
-            log.warning(f"Only {remaining:.0f}s left, stopping before Claude call at iteration {iteration}")
-            break
+        # Build Claude message content
+        content = []
+        for img in image_blocks:
+            if "inline_data" in img:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img["inline_data"]["mime_type"],
+                        "data": img["inline_data"]["data"],
+                    },
+                })
+        content.append({"type": "text", "text": user_text})
 
-        # Trim old messages to keep context small (keep last 6 exchanges)
-        if len(messages) > 13:  # 1 user + 6 pairs of (assistant, user)
-            # Keep first user message + last 6 exchanges
-            messages = [messages[0]] + messages[-12:]
+        messages = [{"role": "user", "content": content}]
 
-        # Use Haiku for simple tasks, Sonnet for complex
-        model = HAIKU_MODEL if task_type in HAIKU_TASKS else CLAUDE_MODEL
-        try:
-            tok = 1536 if task_type in COMPLEX_TASKS else 768
-            response = claude_client.messages.create(
-                model=model,
-                max_tokens=tok,
-                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-                tools=TOOLS,
-                messages=messages,
-                temperature=0.0,
-            )
-        except anthropic.RateLimitError:
-            log.warning(f"429 on {model}, falling back to Haiku")
-            try:
-                response = claude_client.messages.create(
-                    model=HAIKU_MODEL,
-                    max_tokens=tok,
-                    system=[{"type": "text", "text": system_prompt}],
-                    tools=TOOLS,
-                    messages=messages,
-                    temperature=0.0,
-                )
-            except Exception as e2:
-                log.error(f"Haiku fallback also failed: {e2}")
+        for iteration in range(max_iterations):
+            if time.time() > deadline:
+                log.warning(f"Deadline reached at iteration {iteration}")
                 break
-        except Exception as e:
-            log.error(f"Claude API error: {e}")
-            break
+            remaining = deadline - time.time()
+            if remaining < 15:
+                log.warning(f"Only {remaining:.0f}s left, stopping at iteration {iteration}")
+                break
 
-        if response.stop_reason == "tool_use":
-            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            # Trim old messages (keep first user + last 12)
+            if len(messages) > 13:
+                messages = [messages[0]] + messages[-12:]
 
-            # Execute tools in parallel if multiple
-            if len(tool_blocks) > 1:
-                import concurrent.futures
-                def run_tool(block):
-                    log.info(f"Tool: {block.name}({json.dumps(block.input, ensure_ascii=False)[:800]})")
-                    result = execute_tool(block.name, block.input, session, base_url, trace, ctx)
-                    return {"type": "tool_result", "tool_use_id": block.id, "content": result}
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-                    tool_results = list(ex.map(run_tool, tool_blocks))
-            else:
+            response = claude_generate(system_prompt, messages, CLAUDE_TOOLS, tok)
+            if not response:
+                log.error("Claude returned no response")
+                break
+
+            # Check for tool use
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+            if tool_uses:
+                # Add assistant response to conversation
+                messages.append({"role": "assistant", "content": response.content})
+
+                # Execute tools
                 tool_results = []
-                for block in tool_blocks:
-                    log.info(f"Tool: {block.name}({json.dumps(block.input, ensure_ascii=False)[:800]})")
-                    result = execute_tool(block.name, block.input, session, base_url, trace, ctx)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
+                if len(tool_uses) > 1:
+                    import concurrent.futures
+                    def run_claude_tool(tu):
+                        log.info(f"Tool: {tu.name}({json.dumps(tu.input, ensure_ascii=False)[:800]})")
+                        result = execute_tool(tu.name, tu.input, session, base_url, trace, ctx)
+                        return {"type": "tool_result", "tool_use_id": tu.id, "content": str(result)[:4000]}
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                        tool_results = list(ex.map(run_claude_tool, tool_uses))
+                else:
+                    for tu in tool_uses:
+                        log.info(f"Tool: {tu.name}({json.dumps(tu.input, ensure_ascii=False)[:800]})")
+                        result = execute_tool(tu.name, tu.input, session, base_url, trace, ctx)
+                        result_str = str(result)[:4000]
+                        # Add urgency signal
+                        remaining_time = deadline - time.time()
+                        remaining_iters = max_iterations - iteration - 1
+                        if remaining_time < 60 or remaining_iters <= 3:
+                            result_str += f"\n[URGENT: {remaining_time:.0f}s and {remaining_iters} iterations left. Batch ALL remaining calls NOW or stop.]"
+                        tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result_str})
 
-            messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": tool_results})
 
-            # Add urgency signal when running low on time or iterations
-            remaining_time = deadline - time.time()
-            remaining_iters = max_iterations - iteration - 1
-            if remaining_time < 60 or remaining_iters <= 3:
-                # Append urgency to last tool result content
-                last_result = tool_results[-1]
-                last_result["content"] = last_result["content"] + f"\n[URGENT: {remaining_time:.0f}s and {remaining_iters} iterations left. Batch ALL remaining calls NOW or stop.]"
-            messages.append({"role": "user", "content": tool_results})
-
-            # Safety: too many errors
-            error_count = sum(1 for t in trace if t.get("status", 200) >= 400)
-            if error_count >= 15:
-                log.warning(f"Too many errors ({error_count}), stopping")
+                # Safety: too many errors
+                error_count = sum(1 for t in trace if t.get("status", 200) >= 400)
+                if error_count >= 15:
+                    log.warning(f"Too many errors ({error_count}), stopping")
+                    break
+            else:
+                log.info(f"Claude finished at iteration {iteration}")
                 break
-        else:
-            # Claude is done
-            log.info(f"Claude finished at iteration {iteration}")
-            break
+
+    else:
+        # ═══ GEMINI AGENT LOOP (fallback) ═══
+        log.info("Using Gemini agent loop")
+
+        content_parts = [{"text": user_text}]
+        content_parts.extend(image_blocks)
+        messages = [{"role": "user", "parts": content_parts}]
+
+        for iteration in range(max_iterations):
+            if time.time() > deadline:
+                log.warning(f"Deadline reached at iteration {iteration}")
+                break
+
+            remaining = deadline - time.time()
+            if remaining < 15:
+                log.warning(f"Only {remaining:.0f}s left, stopping at iteration {iteration}")
+                break
+
+            if len(messages) > 13:
+                messages = [messages[0]] + messages[-12:]
+
+            resp_json = gemini_generate(GEMINI_MODEL, system_prompt, messages, GEMINI_TOOLS, tok)
+            if not resp_json or "candidates" not in resp_json:
+                log.error(f"Gemini returned no candidates: {json.dumps(resp_json or {})[:500]}")
+                break
+
+            candidate = resp_json["candidates"][0]
+            parts = candidate.get("content", {}).get("parts", [])
+
+            function_calls = [p for p in parts if "functionCall" in p]
+
+            if function_calls:
+                messages.append({"role": "model", "parts": parts})
+
+                fn_responses = []
+                if len(function_calls) > 1:
+                    import concurrent.futures
+                    def run_tool(fc_part):
+                        fc = fc_part["functionCall"]
+                        log.info(f"Tool: {fc['name']}({json.dumps(fc.get('args', {}), ensure_ascii=False)[:800]})")
+                        result = execute_tool(fc["name"], fc.get("args", {}), session, base_url, trace, ctx)
+                        return {"functionResponse": {"name": fc["name"], "response": {"result": result}}}
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                        fn_responses = list(ex.map(run_tool, function_calls))
+                else:
+                    for fc_part in function_calls:
+                        fc = fc_part["functionCall"]
+                        log.info(f"Tool: {fc['name']}({json.dumps(fc.get('args', {}), ensure_ascii=False)[:800]})")
+                        result = execute_tool(fc["name"], fc.get("args", {}), session, base_url, trace, ctx)
+                        fn_responses.append({"functionResponse": {"name": fc["name"], "response": {"result": result}}})
+
+                remaining_time = deadline - time.time()
+                remaining_iters = max_iterations - iteration - 1
+                if remaining_time < 60 or remaining_iters <= 3:
+                    last_resp = fn_responses[-1]["functionResponse"]["response"]
+                    last_resp["result"] = str(last_resp["result"]) + f"\n[URGENT: {remaining_time:.0f}s and {remaining_iters} iterations left. Batch ALL remaining calls NOW or stop.]"
+
+                messages.append({"role": "user", "parts": fn_responses})
+
+                error_count = sum(1 for t in trace if t.get("status", 200) >= 400)
+                if error_count >= 15:
+                    log.warning(f"Too many errors ({error_count}), stopping")
+                    break
+            else:
+                log.info(f"Gemini finished at iteration {iteration}")
+                break
 
     elapsed = time.time() - start_time
     total_calls = len(trace)
     total_errors = sum(1 for t in trace if t.get("status", 200) >= 400)
-    log.info(f"=== DONE {elapsed:.1f}s type={task_type} calls={total_calls} errors={total_errors} ===")
+    log.info(f"=== DONE {elapsed:.1f}s type={task_type} calls={total_calls} errors={total_errors} fp={_prompt_fingerprint(prompt)} ===")
 
     # Log run
-    _log_run(prompt, files, trace, elapsed)
+    _log_run(prompt, files, trace, elapsed, task_type)
 
     return JSONResponse({"status": "completed"})
 
 
-def _log_run(prompt, files, trace, elapsed):
+def _prompt_fingerprint(prompt: str) -> str:
+    """Create a stable fingerprint for a prompt to identify recurring tasks."""
+    return hashlib.md5(prompt.strip().encode()).hexdigest()[:12]
+
+def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     """Append run details to JSONL log."""
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "model": CLAUDE_MODEL,
-            "prompt": prompt[:500],
+            "version": "v33-claude",
+            "model": CLAUDE_MODEL if USE_CLAUDE else GEMINI_MODEL,
+            "task_type": task_type,
+            "prompt_fingerprint": _prompt_fingerprint(prompt),
+            "prompt": prompt[:1000],
             "files": [f["filename"] for f in files] if files and isinstance(files[0], dict) else [],
             "api_calls": len(trace),
             "api_errors": sum(1 for t in trace if t.get("status", 200) >= 400),
             "elapsed_seconds": round(elapsed, 1),
             "trace": trace,
         }
+        entry_json = json.dumps(entry, ensure_ascii=False)
         with open(LOG_PATH, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.write(entry_json + "\n")
+        # Persist to GCS (survives deploys)
+        _gcs_append_log(entry_json)
     except Exception:
         pass
 
 
 @app.get("/logs")
 def get_logs():
-    """View recent submission logs."""
+    """View recent submission logs (persistent via GCS)."""
+    gcs_entries = _gcs_read_logs()
+    if gcs_entries:
+        return {"runs": gcs_entries[-50:], "count": len(gcs_entries), "source": "gcs"}
     if not LOG_PATH.exists():
         return {"runs": [], "count": 0}
     lines = LOG_PATH.read_text().strip().split("\n")
     entries = [json.loads(l) for l in lines if l.strip()]
-    return {"runs": entries[-50:], "count": len(entries)}
+    return {"runs": entries[-50:], "count": len(entries), "source": "local"}
+
+
+@app.get("/taskmap")
+def get_taskmap():
+    """Aggregated view: group all runs by prompt fingerprint.
+    Shows unique tasks with their type, run count, latest trace, and prompt snippet."""
+    entries = _gcs_read_logs()
+    if not entries:
+        if LOG_PATH.exists():
+            lines = LOG_PATH.read_text().strip().split("\n")
+            entries = [json.loads(l) for l in lines if l.strip()]
+
+    tasks = {}
+    for e in entries:
+        fp = e.get("prompt_fingerprint", "unknown")
+        if fp not in tasks:
+            tasks[fp] = {
+                "fingerprint": fp,
+                "task_type": e.get("task_type", "unknown"),
+                "prompt_snippet": e.get("prompt", "")[:200],
+                "runs": 0,
+                "best_calls": 999,
+                "worst_calls": 0,
+                "best_errors": 999,
+                "latest_timestamp": "",
+                "history": [],
+            }
+        t = tasks[fp]
+        t["runs"] += 1
+        calls = e.get("api_calls", 0)
+        errors = e.get("api_errors", 0)
+        t["best_calls"] = min(t["best_calls"], calls)
+        t["worst_calls"] = max(t["worst_calls"], calls)
+        t["best_errors"] = min(t["best_errors"], errors)
+        t["latest_timestamp"] = e.get("timestamp", "")
+        t["history"].append({
+            "timestamp": e.get("timestamp", ""),
+            "version": e.get("version", "?"),
+            "calls": calls,
+            "errors": errors,
+            "elapsed": e.get("elapsed_seconds", 0),
+        })
+
+    # Sort by task type for readability
+    sorted_tasks = sorted(tasks.values(), key=lambda x: x["task_type"])
+    return {"unique_tasks": len(sorted_tasks), "tasks": sorted_tasks}
+
+
+@app.post("/scores")
+async def post_scores(request: Request):
+    """POST task scores from leaderboard. Body: {"scores": {1: 2.0, 2: 3.5, ...}}
+    Persists to GCS so we can track score changes over time."""
+    try:
+        body = await request.json()
+        scores = body.get("scores", {})
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "scores": {str(k): v for k, v in scores.items()},
+            "total": sum(scores.values()),
+        }
+        entry_json = json.dumps(entry, ensure_ascii=False)
+        try:
+            client = _gcs_client()
+            if client:
+                bucket = client.bucket(GCS_BUCKET)
+                if not bucket.exists():
+                    bucket.location = "EUROPE-NORTH1"
+                    client.create_bucket(bucket)
+                blob = bucket.blob("scores.jsonl")
+                existing = ""
+                if blob.exists():
+                    existing = blob.download_as_text()
+                blob.upload_from_string(existing + entry_json + "\n", content_type="text/plain")
+        except Exception as e:
+            log.warning(f"GCS score write failed: {e}")
+        return {"status": "saved", "total": sum(scores.values())}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/scores")
+def get_scores():
+    """Get score history over time."""
+    try:
+        client = _gcs_client()
+        if not client:
+            return {"history": []}
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob("scores.jsonl")
+        if not blob.exists():
+            return {"history": []}
+        lines = blob.download_as_text().strip().split("\n")
+        entries = [json.loads(l) for l in lines if l.strip()]
+        return {"history": entries}
+    except Exception:
+        return {"history": []}
+
+
+@app.post("/tag")
+async def tag_task(request: Request):
+    """Tag a fingerprint with a task number. Body: {"fingerprint": "abc123", "task_number": 4}
+    Or tag by matching prompt text: {"match": "keyword in prompt", "task_number": 4}"""
+    try:
+        body = await request.json()
+        client = _gcs_client()
+        if not client:
+            return JSONResponse({"error": "GCS not available"}, status_code=500)
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob("task_tags.json")
+        tags = {}
+        if blob.exists():
+            tags = json.loads(blob.download_as_text())
+
+        if "fingerprint" in body:
+            tags[body["fingerprint"]] = body["task_number"]
+        elif "match" in body:
+            # Find fingerprints matching this text in logs
+            entries = _gcs_read_logs()
+            matched = 0
+            for e in entries:
+                if body["match"].lower() in e.get("prompt", "").lower():
+                    tags[e["prompt_fingerprint"]] = body["task_number"]
+                    matched += 1
+            if matched == 0:
+                return {"status": "no_match", "search": body["match"]}
+
+        blob.upload_from_string(json.dumps(tags), content_type="application/json")
+        return {"status": "tagged", "tags": tags}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+def _get_task_tags() -> dict:
+    """Get fingerprint → task_number mapping from GCS."""
+    try:
+        client = _gcs_client()
+        if not client:
+            return {}
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob("task_tags.json")
+        if not blob.exists():
+            return {}
+        return json.loads(blob.download_as_text())
+    except Exception:
+        return {}
+
+
+def _get_task_knowledge() -> dict:
+    """Get task knowledge base from GCS. {task_number: {type, checks, notes, experiments}}"""
+    try:
+        client = _gcs_client()
+        if not client:
+            return {}
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob("task_knowledge.json")
+        if not blob.exists():
+            return {}
+        return json.loads(blob.download_as_text())
+    except Exception:
+        return {}
+
+
+def _save_task_knowledge(knowledge: dict):
+    """Save task knowledge base to GCS."""
+    try:
+        client = _gcs_client()
+        if not client:
+            return
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob("task_knowledge.json")
+        blob.upload_from_string(json.dumps(knowledge, ensure_ascii=False, indent=2), content_type="application/json")
+    except Exception as e:
+        log.warning(f"GCS knowledge write failed: {e}")
+
+
+@app.post("/knowledge")
+async def post_knowledge(request: Request):
+    """Update task knowledge. Body: {"task_number": 1, "type": "employee", "checks_total": 7, "checks_passed": 7, "score": 1.50, "notes": "...", "experiments": [...]}"""
+    try:
+        body = await request.json()
+        tn = str(body["task_number"])
+        knowledge = _get_task_knowledge()
+        if tn not in knowledge:
+            knowledge[tn] = {"type": "", "experiments": [], "best_score": 0, "checks": "", "notes": ""}
+        k = knowledge[tn]
+        for field in ("type", "checks", "notes"):
+            if field in body:
+                k[field] = body[field]
+        if "score" in body:
+            k["best_score"] = max(k.get("best_score", 0), body["score"])
+            k["latest_score"] = body["score"]
+        if "experiment" in body:
+            k["experiments"].append(body["experiment"])
+        _save_task_knowledge(knowledge)
+        return {"status": "saved", "task": tn, "knowledge": k}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/knowledge")
+def get_knowledge():
+    """Get all task knowledge."""
+    return _get_task_knowledge()
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    """Visual dashboard with task scores, run logs, and API trace details."""
+    score_history = get_scores().get("history", [])
+    latest_scores = score_history[-1] if score_history else {"scores": {}, "total": 0, "timestamp": "---"}
+    prev_scores = score_history[-2] if len(score_history) >= 2 else None
+    tags = _get_task_tags()
+    reverse_tags = {v: k for k, v in tags.items()}
+    all_logs = _gcs_read_logs()
+    knowledge = _get_task_knowledge()
+
+    # Build task cards with knowledge
+    cards_html = ""
+    total = 0
+    total_delta = 0
+    for i in range(1, 31):
+        s = float(latest_scores["scores"].get(str(i), 0))
+        total += s
+        delta = ""
+        if prev_scores:
+            prev = float(prev_scores["scores"].get(str(i), 0))
+            diff = s - prev
+            if diff > 0.01:
+                delta = f'<span class="delta up">+{diff:.2f}</span>'
+                total_delta += diff
+            elif diff < -0.01:
+                delta = f'<span class="delta down">{diff:.2f}</span>'
+                total_delta += diff
+
+        if s == 0:
+            color = "#ef4444"
+        elif s < 2.0:
+            color = "#f97316"
+        elif s < 3.5:
+            color = "#eab308"
+        elif s < 5.0:
+            color = "#22c55e"
+        else:
+            color = "#06b6d4"
+
+        # Get knowledge for this task
+        k = knowledge.get(str(i), {})
+        type_name = k.get("type", "")
+        if not type_name:
+            fp = reverse_tags.get(i) or reverse_tags.get(str(i))
+            if fp:
+                for e in all_logs:
+                    if e.get("prompt_fingerprint") == fp:
+                        type_name = e.get("task_type", "")
+                        break
+
+        type_html = f'<div class="task-type">{type_name}</div>' if type_name else ''
+        checks_html = f'<div class="task-checks">{k["checks"]}</div>' if k.get("checks") else ''
+        notes_html = f'<div class="task-notes" title="{k.get("notes","")}">{k.get("notes","")[:30]}</div>' if k.get("notes") else ''
+        exp_count = len(k.get("experiments", []))
+        exp_html = f'<div class="task-exp">{exp_count} exp</div>' if exp_count > 0 else ''
+
+        cards_html += f'''
+        <div class="card" style="border-top: 3px solid {color}">
+            <div class="task-num">Task {i:02d}</div>
+            <div class="score" style="color: {color}">{s:.2f}</div>
+            {delta}
+            {type_html}
+            {checks_html}
+            {notes_html}
+            {exp_html}
+        </div>'''
+
+    total_delta_html = ""
+    if prev_scores:
+        if total_delta > 0:
+            total_delta_html = f'<span class="delta up" style="font-size:1.2em">+{total_delta:.2f}</span>'
+        elif total_delta < 0:
+            total_delta_html = f'<span class="delta down" style="font-size:1.2em">{total_delta:.2f}</span>'
+
+    # Recent runs — last 20, newest first
+    recent_runs = sorted(all_logs, key=lambda x: x.get("timestamp", ""), reverse=True)[:20]
+    runs_html = ""
+    for r in recent_runs:
+        fp = r.get("prompt_fingerprint", "?")
+        task_num = tags.get(fp, "?")
+        task_type = r.get("task_type", "?")
+        calls = r.get("api_calls", 0)
+        errors = r.get("api_errors", 0)
+        elapsed = r.get("elapsed_seconds", 0)
+        ts = r.get("timestamp", "")[:19].replace("T", " ")
+        ver = r.get("version", "?")
+        prompt_snip = r.get("prompt", "")[:120].replace("<", "&lt;").replace('"', "&quot;")
+
+        # Trace summary — show API endpoints called and their status
+        trace = r.get("trace", [])
+        trace_summary = ""
+        if trace:
+            status_counts = {}
+            endpoints = []
+            for t in trace[:15]:  # first 15 calls
+                method = t.get("method", "?")
+                path = t.get("path", t.get("url", "?"))
+                # Shorten path
+                if isinstance(path, str) and "/v2/" in path:
+                    path = path.split("/v2/")[-1]
+                elif isinstance(path, str) and "tripletex" in path:
+                    path = path.split(".dev/v2/")[-1] if ".dev/v2/" in path else path.split(".no/v2/")[-1] if ".no/v2/" in path else path
+                status = t.get("status", "?")
+                endpoints.append(f"{method} {path[:40]} → {status}")
+                key = f"{status}"
+                status_counts[key] = status_counts.get(key, 0) + 1
+            status_str = " ".join(f'<span class="{"st-ok" if str(k).startswith("2") else "st-err"}">{k}:{v}</span>' for k, v in sorted(status_counts.items()))
+            trace_detail = "\\n".join(endpoints)
+            trace_summary = f'<div class="trace-status">{status_str}</div>'
+            trace_summary += f'<details><summary>Vis {len(trace)} API-kall</summary><pre class="trace-pre">{chr(10).join(endpoints)}</pre></details>'
+
+        error_class = ' class="run-error"' if errors > 0 else ""
+        task_label = f"<b>T{task_num}</b>" if task_num != "?" else f'<span class="untagged" title="{fp}">#{fp[:8]}</span>'
+
+        runs_html += f'''
+        <div class="run-card"{error_class}>
+            <div class="run-header">
+                <span class="run-task">{task_label}</span>
+                <span class="run-type">{task_type}</span>
+                <span class="run-stats">{calls} calls, {errors} err, {elapsed}s</span>
+                <span class="run-time">{ts}</span>
+                <span class="run-ver">{ver}</span>
+            </div>
+            <div class="run-prompt">{prompt_snip}</div>
+            {trace_summary}
+        </div>'''
+
+    # Score history
+    history_html = ""
+    if score_history:
+        for idx, h in enumerate(score_history):
+            pct = (h["total"] / 180) * 100
+            ts = h["timestamp"][:16].replace("T", " ")
+            history_html += f'''
+            <div class="bar-row">
+                <div class="bar-label">#{idx+1}</div>
+                <div class="bar" style="width:{pct}%"></div>
+                <div class="bar-val">{h["total"]:.2f} &middot; {ts}</div>
+            </div>'''
+    else:
+        history_html = '<p style="color:#94a3b8">Ingen score-historikk ennå.</p>'
+
+    html = f'''<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Tripletex Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ background:#0f172a; color:#e2e8f0; font-family:-apple-system,system-ui,sans-serif; padding:16px; max-width:1200px; margin:0 auto; }}
+h1 {{ text-align:center; margin-bottom:4px; font-size:1.4em; }}
+.subtitle {{ text-align:center; color:#94a3b8; margin-bottom:16px; font-size:0.85em; }}
+.total {{ text-align:center; font-size:2.8em; font-weight:800; color:#06b6d4; margin:8px 0; }}
+.grid {{ display:grid; grid-template-columns:repeat(6,1fr); gap:8px; margin-bottom:24px; }}
+@media(max-width:800px) {{ .grid {{ grid-template-columns:repeat(3,1fr); }} }}
+.card {{ background:#1e293b; border-radius:8px; padding:10px; text-align:center; }}
+.task-num {{ font-size:0.7em; color:#94a3b8; }}
+.task-type {{ font-size:0.65em; color:#64748b; margin-top:2px; }}
+.task-checks {{ font-size:0.6em; color:#94a3b8; }}
+.task-notes {{ font-size:0.55em; color:#475569; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.task-exp {{ font-size:0.55em; color:#06b6d4; }}
+.score {{ font-size:1.6em; font-weight:700; }}
+.delta {{ font-size:0.75em; display:block; margin-top:1px; }}
+.delta.up {{ color:#22c55e; }}
+.delta.down {{ color:#ef4444; }}
+h2 {{ margin:24px 0 8px; font-size:1.1em; color:#06b6d4; }}
+.legend {{ display:flex; gap:12px; justify-content:center; margin:10px 0; font-size:0.75em; flex-wrap:wrap; }}
+.legend span {{ display:flex; align-items:center; gap:3px; }}
+.dot {{ width:8px; height:8px; border-radius:50%; display:inline-block; }}
+.history {{ background:#1e293b; border-radius:8px; padding:12px; margin:8px 0; }}
+.bar-row {{ display:flex; align-items:center; gap:6px; margin:3px 0; }}
+.bar-label {{ width:40px; text-align:right; font-size:0.75em; color:#94a3b8; }}
+.bar {{ height:16px; border-radius:3px; background:#06b6d4; min-width:2px; }}
+.bar-val {{ font-size:0.75em; color:#94a3b8; }}
+.run-card {{ background:#1e293b; border-radius:8px; padding:10px; margin:6px 0; border-left:3px solid #334155; }}
+.run-card.run-error {{ border-left-color:#ef4444; }}
+.run-header {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:0.8em; }}
+.run-task {{ color:#06b6d4; font-size:1.1em; min-width:40px; }}
+.run-type {{ background:#334155; padding:2px 8px; border-radius:4px; color:#94a3b8; }}
+.run-stats {{ color:#94a3b8; }}
+.run-time {{ color:#64748b; margin-left:auto; }}
+.run-ver {{ color:#475569; font-size:0.8em; }}
+.run-prompt {{ font-size:0.75em; color:#64748b; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.trace-status {{ margin-top:4px; font-size:0.75em; }}
+.st-ok {{ color:#22c55e; margin-right:6px; }}
+.st-err {{ color:#ef4444; margin-right:6px; }}
+details {{ margin-top:4px; font-size:0.75em; }}
+summary {{ color:#64748b; cursor:pointer; }}
+.trace-pre {{ background:#0f172a; padding:8px; border-radius:4px; margin-top:4px; overflow-x:auto; font-size:0.85em; color:#94a3b8; white-space:pre-wrap; }}
+.untagged {{ color:#f97316; cursor:help; }}
+.refresh {{ text-align:center; margin:16px 0; }}
+.refresh a {{ color:#06b6d4; text-decoration:none; background:#1e293b; padding:6px 16px; border-radius:6px; font-size:0.85em; }}
+</style></head><body>
+<h1>Tripletex Agent</h1>
+<p class="subtitle">v25 &middot; {latest_scores.get("timestamp", "---")[:19]} &middot; Auto-refresh 60s</p>
+<div class="total">{total:.2f} {total_delta_html}</div>
+<div class="legend">
+    <span><span class="dot" style="background:#ef4444"></span> 0</span>
+    <span><span class="dot" style="background:#f97316"></span> &lt;2</span>
+    <span><span class="dot" style="background:#eab308"></span> 2-3.5</span>
+    <span><span class="dot" style="background:#22c55e"></span> 3.5-5</span>
+    <span><span class="dot" style="background:#06b6d4"></span> 5+</span>
+</div>
+<div class="grid">{cards_html}</div>
+
+<h2>Siste kjøringer</h2>
+{runs_html if runs_html else '<p style="color:#94a3b8">Ingen kjøringer ennå. Submit tasks først.</p>'}
+
+<h2>Score-historikk</h2>
+<div class="history">{history_html}</div>
+
+<div class="refresh"><a href="/dashboard">Oppdater nå</a></div>
+</body></html>'''
+
+    return HTMLResponse(html)
 
 
 if __name__ == "__main__":
