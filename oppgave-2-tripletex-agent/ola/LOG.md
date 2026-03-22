@@ -10,13 +10,44 @@
 | 5 | Claude Sonnet 4 + v6-v14 | ~50 pts | Ja | Iterativ forbedring, 19 oppskrifter, interceptors |
 | 6 | Claude Sonnet 4 + v15 | ? | Ja | Full T3-støtte: year-end, bank recon, ledger audit, FX, reminder |
 
-## Status
+## Status (22. mars 11:00)
 - Cloud Run: `https://tripletex-agent-609915262705.europe-north1.run.app`
-- LLM: Claude Sonnet 4
-- 134 runs, 657 API-kall, 29 errors (per 21. mars 23:xx)
-- 27 av 30 oppgavetyper identifisert fra logger
+- **Deployed: rev 00204** (siste stabile)
+- LLM: Claude Sonnet 4 (claude-sonnet-4-6)
+- T3 aktiv
 
-## v15 (nåværende — deployed 21. mars ~23:xx)
+## v56→v204 (Mathea-sesjon 22. mars — SISTE DEPLOY)
+Massive infrastructure + recipe-fixes. Disse var alle 0-score pga bugs:
+
+### Kritiske infrastruktur-fixes:
+1. **`import anthropic` på modulnivå** — mangler i v15, ga NameError på alle API-feil
+2. **ANTHROPIC_API_KEY satt i Cloud Run** — var tom string, Claude fungerte ikke
+3. **2s rate-limit sleep** mellom Claude-kall — forhindrer 429 timeouts (13-33s ventetid per retry)
+4. **480s deadline + 540s Cloud Run timeout** — year_end og komplekse tasks trengte mer tid
+
+### Verified field schemas (fra OpenAPI spec):
+5. **Account.type enum**: `ASSETS | EQUITY | LIABILITIES | OPERATING_REVENUES | OPERATING_EXPENSES | ...` (ikke "ASSET"!)
+6. **Account.ledgerType**: `GENERAL | CUSTOMER | VENDOR | EMPLOYEE | ASSET`
+7. **fixedprice** (lowercase p!) + `isFixedPrice:true` — ikke "fixedPrice" (eksisterer ikke)
+8. **PUT /employee** krever alltid `dateOfBirth` — inkluder fra pre-fetched context
+9. **openapi.json** lagret i repo — full API spec (3.6MB)
+
+### Endpoint-fixes (fra feilede runs):
+10. **`/order/orderline`** (ALL lowercase) — `/order/orderLine` (capital L) returnerer 405
+11. **Invoice-flow**: `PUT /order/{id}/:invoice?invoiceDate=X&sendToCustomer=false` — IKKE `POST /invoice` med `invoiceLines` (eksisterer ikke)
+12. **Sjekk produkt FØR POST**: `GET /product?number=X` — hvis exists, bruk eksisterende ID
+
+### Observerte task-resultater (22. mars):
+| Task | Resultat | Detalj |
+|------|----------|--------|
+| employee_pdf | 0 → fixet | Var invalid media_type på PDF→image (fixet v51) |
+| fx_invoice | 0 → fixet | Var NameError + tom API key |
+| year_end | Delvis | Ferdig på 253s, 5 vouchers, 2 errors. 429 rate limits |
+| invoice_multi | 0 → fixet | /order/orderLine 405 → fixet til lowercase |
+| customer | ✅ Perfekt | 5.3s, 1 kall, 0 feil |
+| project_fixed | Delvis | fixedPrice 422 → fixet til fixedprice |
+
+## v15 (historisk — deployed 21. mars ~23:xx)
 1. **5 nye T3-oppskrifter**: YEAR_END, BANK_RECON, REMINDER_FEE, LEDGER_AUDIT, FX_INVOICE
 2. **Forbedret task detection** — regex-basert, 27+ typer (opp fra 9)
 3. **Dynamisk max_tokens** — 2048 for komplekse, 1024 for enkle

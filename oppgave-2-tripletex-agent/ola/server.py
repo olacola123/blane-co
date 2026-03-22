@@ -17,6 +17,7 @@ import concurrent.futures
 from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 
+import anthropic
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -731,8 +732,34 @@ Postings MUST balance to 0. row and date REQUIRED on each.
 For zero-VAT postings: use the "Ingen avgiftsbehandling" vatType ID from PRE-FETCHED DATA (never hardcode id:0!).
 Customer accounts (1500) need customer:{{id:X}}. Supplier accounts (2400) need supplier:{{id:X}}.
 
-ENDPOINTS THAT DON'T EXIST: /voucher, /journalEntry, /generalLedgerEntry, /purchaseInvoice, /timeSheet.
-Use /ledger/voucher for ALL vouchers/journal entries."""
+ENDPOINTS THAT DON'T EXIST: /voucher, /journalEntry, /generalLedgerEntry, /purchaseInvoice, /timeSheet, /order/orderLine (capital L!).
+Use /ledger/voucher for ALL vouchers/journal entries.
+Order lines: POST /order/orderline (all lowercase, no capital L ever).
+Project fixed price: isFixedPrice (boolean) + fixedprice (number, ALL lowercase p). "fixedPrice" does NOT exist.
+PUT /employee ALWAYS requires dateOfBirth — include it from pre-fetched employee data.
+
+VERIFIED ENUM VALUES (from OpenAPI spec — use EXACTLY these strings):
+Account.type: ASSETS | EQUITY | LIABILITIES | OPERATING_REVENUES | OPERATING_EXPENSES | INVESTMENT_INCOME | COST_OF_CAPITAL | TAX_ON_ORDINARY_ACTIVITIES | EXTRAORDINARY_INCOME | EXTRAORDINARY_COST | ANNUAL_RESULT | TRANSFERS_AND_ALLOCATIONS
+Account.ledgerType: GENERAL | CUSTOMER | VENDOR | EMPLOYEE | ASSET
+Employee.userType: STANDARD | EXTENDED | NO_ACCESS  (NEVER "ADMINISTRATOR")
+Employment.taxDeductionCode: loennFraHovedarbeidsgiver | loennFraBiarbeidsgiver | pensjon | loennTilUtenrikstjenestemann | ''
+EmploymentDetails.employmentType: ORDINARY | MARITIME | FREELANCE | NOT_CHOSEN
+EmploymentDetails.employmentForm: PERMANENT | TEMPORARY | PERMANENT_AND_HIRED_OUT | TEMPORARY_AND_HIRED_OUT | NOT_CHOSEN
+EmploymentDetails.remunerationType: MONTHLY_WAGE | HOURLY_WAGE | COMMISION_PERCENTAGE | FEE | NOT_CHOSEN
+EmploymentDetails.workingHoursScheme: NOT_SHIFT | ROUND_THE_CLOCK | SHIFT_365 | OFFSHORE_336 | CONTINUOUS | OTHER_SHIFT | NOT_CHOSEN
+Customer.invoiceSendMethod: EMAIL | EHF | EFAKTURA | AVTALEGIRO | VIPPS | PAPER | MANUAL
+Order.status: NOT_CHOSEN | NEW | READY_FOR_INVOICING | INVOICED | CANCELLED
+Activity.activityType: GENERAL_ACTIVITY | PROJECT_GENERAL_ACTIVITY | PROJECT_SPECIFIC_ACTIVITY | TASK
+BankReconciliation.type: MANUAL | AUTOMATIC
+Posting.type: INCOMING_PAYMENT | INCOMING_PAYMENT_OPPOSITE | INCOMING_INVOICE_CUSTOMER_POSTING | INVOICE_EXPENSE | OUTGOING_INVOICE_CUSTOMER_POSTING | WAGE
+
+ACCOUNT TYPE GUIDE (when creating new accounts):
+- Depreciation expense (avskrivning): type=OPERATING_EXPENSES, ledgerType=GENERAL  e.g. 6010, 6020
+- Accumulated depreciation (akkumulert avskrivning): type=ASSETS, ledgerType=GENERAL  e.g. 1209, 1219
+- Balance sheet assets: type=ASSETS, ledgerType=GENERAL
+- Revenue accounts: type=OPERATING_REVENUES, ledgerType=GENERAL
+- Liability accounts: type=LIABILITIES, ledgerType=GENERAL
+- Tax provision (skattekostnad): type=TAX_ON_ORDINARY_ACTIVITIES, ledgerType=GENERAL"""
 
     recipes = _get_recipes(task_type, today, due, company_id)
 
@@ -785,11 +812,15 @@ departmentNumber must be unique. Check EXISTING DEPARTMENTS for used numbers."""
     elif task_type in ("invoice_send", "invoice_multi"):
         return f"""═══ INVOICE TASK ═══
 1. Find/create customer (check EXISTING CUSTOMERS first)
-2. POST /product — number as STRING, vatType from context, set BOTH priceExcludingVatCurrency AND priceIncludingVatCurrency
+2. For each product: GET /product?number=X first. If found (values.length>0) use existing id. Only POST /product if NOT found.
+   POST /product body: {{name, number(STRING), vatType:{{id}}, priceExcludingVatCurrency, priceIncludingVatCurrency}}
 3. POST /order {{customer:{{id:X}}, deliveryDate:"{today}", orderDate:"{today}", isPrioritizeAmountsIncludingVat:false}}
-4. POST /order/orderline — ALWAYS set vatType AND unitPriceExcludingVatCurrency on EACH line
-5. POST /invoice {{invoiceDate:"{today}", invoiceDueDate:"{due}", orders:[{{id:X}}]}} query_params: sendToCustomer=false
-For multi-line: one product + one orderline per product line. Different vatType per line if needed."""
+4. POST /order/orderline (ALL LOWERCASE — /order/orderLine does NOT exist, returns 405!)
+   body: {{order:{{id:ORDER_ID}}, product:{{id:PROD_ID}}, count:1, unitPriceExcludingVatCurrency:PRICE, vatType:{{id:VAT_ID}}}}
+   Send all orderlines in parallel in ONE response.
+5. PUT /order/ORDER_ID/:invoice query_params: invoiceDate={today}&sendToCustomer=false
+   (Do NOT use POST /invoice with invoiceLines — that field does not exist!)
+For send task: also PUT /invoice/ID/:send query_params: sendType=EMAIL"""
 
     elif task_type == "order":
         return f"""═══ ORDER TASK ═══
@@ -962,9 +993,14 @@ All account IDs from context."""
     elif task_type == "project" or task_type == "project_fixed":
         extra = ""
         if task_type == "project_fixed":
-            extra = "\nAfter creating: GET /project/ID → PUT /project/ID with isFixedPrice:true, fixedprice:AMT, version:V. KEEP original number!"
+            extra = """
+FIXED PRICE SETUP (after creating project):
+GET /project/ID → PUT /project/ID with {{id:X, version:V, isFixedPrice:true, fixedprice:AMT}}
+  isFixedPrice = boolean (true/false)
+  fixedprice = number (lowercase p! NOT fixedPrice or fixed_price — those don't exist)
+PARTIAL INVOICE: product with price=75%×fixedprice → order → orderline → PUT /order/ID/:invoice"""
         return f"""═══ PROJECT TASK ═══
-1. Make employee EXTENDED: PUT /employee/ID with userType:"EXTENDED" + version
+1. Make employee EXTENDED: PUT /employee/ID with {{id:X, version:V, userType:"EXTENDED", firstName, lastName, email, dateOfBirth (REQUIRED! get from pre-fetched context)}}
 2. PUT /employee/entitlement/:grantClientEntitlementsByTemplate?employeeId=ID&customerId={company_id or 'COMPANY_ID'}&template=ACCOUNTING (try; ignore errors)
 3. Find/create customer
 4. POST /project {{name, startDate:"{today}", projectManager:{{id:EMP}}, customer:{{id:CUST}}}} — no "number"!{extra}"""
@@ -1283,7 +1319,7 @@ async def _solve_inner(body, start_time):
 
     system_prompt = build_system_prompt(company_id, task_type)
     trace = []
-    deadline = start_time + 250
+    deadline = start_time + 480
 
     # Build message content
     _VALID_IMG_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
@@ -1311,7 +1347,13 @@ async def _solve_inner(body, start_time):
     messages = [{"role": "user", "content": content}]
 
     # ═══ AGENT LOOP ═══
+    _last_claude_call = 0.0
     for iteration in range(max_iterations):
+        # Rate-limit Claude calls: min 2s between calls to avoid 429s
+        since_last = time.time() - _last_claude_call
+        if since_last < 2.0:
+            time.sleep(2.0 - since_last)
+
         if time.time() > deadline:
             log.warning(f"Deadline at iteration {iteration}")
             break
@@ -1324,6 +1366,7 @@ async def _solve_inner(body, start_time):
         if len(messages) > 15:
             messages = [messages[0]] + messages[-14:]
 
+        _last_claude_call = time.time()
         response = claude_generate(system_prompt, messages, CLAUDE_TOOLS, 2048)
         if not response:
             log.error("Claude returned no response")
