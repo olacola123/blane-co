@@ -32,7 +32,7 @@ from urllib3.util.retry import Retry
 
 sys.path.insert(0, str(Path(__file__).parent))
 from solution import (
-    load_calibration, load_optimized_calibration, SeedObserver,
+    load_calibration, load_optimized_calibration, load_model_tables, SeedObserver,
     MAP_W, MAP_H, NUM_CLASSES, TERRAIN_TO_CLASS,
     PROB_FLOOR, super_predict, vitality_to_vbin,
 )
@@ -86,7 +86,7 @@ def score_from_kl(wkl):
 
 def backtest_round(client, round_id, round_num, seeds_data, transition_table,
                    simple_prior, alpha_override=None, typed_table=None,
-                   opt_tables=None, world_type=None):
+                   opt_tables=None, world_type=None, vbin=None):
     """Test solveren mot fasit for én runde."""
     results = []
 
@@ -95,10 +95,17 @@ def backtest_round(client, round_id, round_num, seeds_data, transition_table,
         grid = seed_data.get("grid", [])
         settlements = seed_data.get("settlements", [])
 
-        observer = SeedObserver(grid, settlements, transition_table, simple_prior,
-                               typed_table=typed_table,
-                               opt_tables=opt_tables, world_type=world_type)
-        pred = observer.build_prediction(world_type=world_type)
+        # Bruk super_predict (samme som live FASE 6) hvis vbin er satt
+        pred = None
+        if vbin is not None:
+            pred = super_predict(grid, settlements, vbin)
+
+        if pred is None:
+            # Fallback til gammel metode
+            observer = SeedObserver(grid, settlements, transition_table, simple_prior,
+                                   typed_table=typed_table,
+                                   opt_tables=opt_tables, world_type=world_type)
+            pred = observer.build_prediction(world_type=world_type)
 
         # Hent fasit
         try:
@@ -213,10 +220,13 @@ def main():
         opt_wtype = wt
         if wt in ("BOOM_CONC", "BOOM_SPREAD"):
             opt_wtype = "BOOM"
+        # Beregn vbin fra oracle survival rate (samme som live ville gjøre med perfekt detection)
+        oracle_vbin = vitality_to_vbin(rate) if total_s > 0 else "MED"
         results = backtest_round(client, round_id, rnum, seeds_data,
                                 transition_table, simple_prior, args.with_alpha,
                                 typed_table=typed_table,
-                                opt_tables=opt_tables, world_type=opt_wtype)
+                                opt_tables=opt_tables, world_type=opt_wtype,
+                                vbin=oracle_vbin)
 
         for res in results:
             if "prior_only_score" in res:

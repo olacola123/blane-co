@@ -243,10 +243,24 @@ userType defaults to STANDARD. startDate is employment start date.""",
 isFood: true if food/beverage (15% VAT). expenseAccount: 6540=office, 6340=IT, 6500=supplies, 7300=service, 7100=vehicle, 7140=travel, 6800=other.""",
 
     "receipt_voucher": """Extract from this receipt/accounting task. Return ONLY valid JSON:
-{"description": "what was purchased", "amountInclVat": 0.00, "vatPercent": 25, "receiptDate": "YYYY-MM-DD", "expenseAccount": "expense account number", "isFood": false, "departmentName": "department name from prompt or empty string"}
-expenseAccount: 6340=IT/datautstyr/computer/elektronikk/USB/laptop/telefon/programvare/lisenser, 6500=office supplies/kontorrekvisita/papir/skriver/penner, 7350=entertainment/representasjon/mat/restaurant, 7100=vehicle/bil/transport/bensin/parkering, 7140=travel/reise/hotell/fly, 6900=phone/mobiltelefon/abonnement, 6300=rent/leie/husleie, 6350=electricity/strøm/energi, 7700=operations/drift, 6800=other/andre driftskostnader, 6540=office equipment/kontormøbler/inventar/oppbevaringsboks/hyller/møbler/renhold.
-isFood: true if food/beverage/restaurant (15% VAT instead of 25%).
-IMPORTANT: Read the PDF carefully for the EXACT amount including VAT, the EXACT date, and classify the purchase correctly.""",
+{"description": "what was purchased", "amountInclVat": 0.00, "vatPercent": 25, "receiptDate": "YYYY-MM-DD", "expenseAccount": "6340", "isFood": false, "departmentName": "department name from prompt or empty string"}
+
+CRITICAL — expenseAccount RULES (pick the FIRST matching category):
+- 6340: IT, data, USB, PC, laptop, computer, skjerm, monitor, tastatur, keyboard, mus, mouse, harddisk, SSD, kabel, adapter, hub, docking, programvare, software, lisens, server, nettverksutstyr, printer, skriver, headset, webkamera, elektronikk
+- 7140: reise, travel, tog, togbillett, train, fly, flight, flyreise, flybillett, hotell, hotel, overnatting, taxi, buss, bus, ferge, ferry, Vy, SAS, Norwegian, Wideroe
+- 7100: bil, car, vehicle, bensin, diesel, fuel, parkering, parking, bompenger, toll, bilservice, dekk, tire
+- 6500: kontorrekvisita, office supplies, papir, paper, penn, penner, pens, konvolutter, toner, blekk, ink, post-it, kopi, binders, stifter
+- 6540: kontorinventar, kontormøbler, office furniture, pult, desk, stol, chair, hylle, shelf, skap, cabinet, oppbevaringsboks, møbler, furniture, lampe, lamp, whiteboard, renhold, cleaning
+- 7350: representasjon, entertainment, restaurant, middag, dinner, lunsj, lunch, bevertning, gave, gift, blomster, flowers, kundemøte, client entertainment
+- 6900: telefon, phone, mobiltelefon, mobile, telefonabonnement, phone subscription, mobildata
+- 6300: leie, rent, husleie, kontorlokale, office rent
+- 6350: strøm, electricity, energi, energy, nettleie, fjernvarme
+- 7700: drift, operations, vedlikehold, maintenance, reparasjon, repair
+- 6800: andre driftskostnader (ONLY if nothing above matches)
+
+isFood: true ONLY if food/beverage/restaurant (gives 15% VAT via vatType 11 instead of 25%).
+departmentName: Extract the department name EXACTLY as written in the task (e.g. "IT", "Drift", "Salg", "Produksjon", "Administrasjon"). This is REQUIRED if mentioned in the task.
+IMPORTANT: Read the PDF/task carefully for EXACT amount including VAT, EXACT date, and classify the purchase by WHAT WAS BOUGHT — not by which department paid for it.""",
 
     "salary": """Extract from this accounting task. Return ONLY valid JSON:
 {"employeeEmail": "email to find employee", "baseSalary": 0.00, "bonus": 0.00, "salaryDate": "YYYY-MM-DD or empty", "month": 0, "year": 0}
@@ -1794,6 +1808,7 @@ def handle_supplier_invoice(data, session, base_url, ctx):
 
 def handle_receipt_voucher(data, session, base_url, ctx):
     trace = []
+    log.info(f"receipt_voucher data: desc={data.get('description')}, acct={data.get('expenseAccount')}, dept={data.get('departmentName')}, amount={data.get('amountInclVat')}, isFood={data.get('isFood')}")
 
     exp_acct_num = _val(data, "expenseAccount", "6500")
     exp_acct_id = _get_acct_id(ctx, exp_acct_num)
@@ -1825,10 +1840,19 @@ def handle_receipt_voucher(data, session, base_url, ctx):
     dept_id = data.get("departmentId")
     dept_name = data.get("departmentName", "")
     if not dept_id and dept_name:
+        dept_name_lower = dept_name.lower().strip()
+        # Try exact match first
         for d in ctx.get("departments", []):
-            if d.get("name", "").lower() == dept_name.lower():
+            if d.get("name", "").lower().strip() == dept_name_lower:
                 dept_id = d["id"]
                 break
+        # Try substring/partial match if exact didn't work
+        if not dept_id:
+            for d in ctx.get("departments", []):
+                d_name = d.get("name", "").lower().strip()
+                if dept_name_lower in d_name or d_name in dept_name_lower:
+                    dept_id = d["id"]
+                    break
         # If not found in prefetch, search via API
         if not dept_id:
             try:

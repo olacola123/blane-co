@@ -68,6 +68,8 @@ CALIBRATION_4TYPE_FILE = Path(__file__).parent / "calibration_4type.json"
 CALIBRATION_OPT_FILE = Path(__file__).parent / "calibration_optimized.json"
 SUPER_CALIBRATION_FILE = Path(__file__).parent / "super_calibration.json"
 MODEL_TABLES_FILE = Path(__file__).parent / "model_tables.json"
+INTERP_TABLES_FILE = Path(__file__).parent / "interp_tables.json"
+KERNEL_DATA_FILE = Path(__file__).parent / "kernel_training_data.json"
 LEARNING_FILE = Path(__file__).parent / "learning_state.json"
 
 # Terrain code → terrain group for optimized tables
@@ -96,13 +98,13 @@ def load_optimized_calibration():
 
 
 # === SUPER-CALIBRATION ===
-# Built from 14 rounds × 5 seeds = 70 GT datasets, 95k data points
+# Built from 17 rounds × 5 seeds = 85 GT datasets, 115k data points
 # Features: vitality_bin × terrain_group × dist_bin × coastal × settle_density × forest_density
 
 _model_cache = None
 
 def load_model_tables():
-    """Load new model tables (built from 14 rounds × 5 seeds = 70 GT datasets)."""
+    """Load lookup tables (17 rounds × 5 seeds)."""
     global _model_cache
     if _model_cache is not None:
         return _model_cache
@@ -118,8 +120,50 @@ def load_model_tables():
     n_spec = len(_model_cache["specific"])
     n_med = len(_model_cache["medium"])
     n_simp = len(_model_cache["simple"])
-    print(f"Lastet model v7: {n_spec} specific + {n_med} medium + {n_simp} simple entries")
+    print(f"Lastet model v8: {n_spec} specific + {n_med} medium + {n_simp} simple entries")
     return _model_cache
+
+
+_interp_cache = None
+
+def load_interp_tables():
+    """Load continuous vitality interpolation tables."""
+    global _interp_cache
+    if _interp_cache is not None:
+        return _interp_cache
+    if not INTERP_TABLES_FILE.exists():
+        print("ADVARSEL: Ingen interp_tables.json")
+        return None
+    data = json.loads(INTERP_TABLES_FILE.read_text())
+    _interp_cache = data.get("tables", {})
+    print(f"Lastet interp v1: {len(_interp_cache)} grupper")
+    return _interp_cache
+
+
+def _interp_predict(key, vitality, interp_tables):
+    """Interpoler distribution for gitt key og vitality."""
+    if key not in interp_tables:
+        return None
+    points = interp_tables[key]
+    if len(points) < 2:
+        return np.array(points[0]["distribution"])
+
+    vits = [p["vitality"] for p in points]
+    # Clamp til range
+    if vitality <= vits[0]:
+        return np.array(points[0]["distribution"])
+    if vitality >= vits[-1]:
+        return np.array(points[-1]["distribution"])
+
+    # Lineær interpolasjon
+    for i in range(len(vits) - 1):
+        if vits[i] <= vitality <= vits[i + 1]:
+            t = (vitality - vits[i]) / (vits[i + 1] - vits[i])
+            d0 = np.array(points[i]["distribution"])
+            d1 = np.array(points[i + 1]["distribution"])
+            return d0 * (1 - t) + d1 * t
+
+    return np.array(points[-1]["distribution"])
 
 
 # Also keep old super_calibration as fallback
@@ -171,19 +215,177 @@ def _forest_density_bin(n):
     else: return 3
 
 
-def super_predict(grid, settlements, vbin, floor=None):
-    """
-    Build prediction using model v7 tables (14 rounds × 5 seeds = 95k data points).
-    vbin: "DEAD", "LOW", "MED", "HIGH"
-    Returns: (H, W, 6) numpy array
+# === KERNEL PREDICTION (v9) ===
+# Bruker continuous vitality + urban for å vekte treningsdata
 
-    Cascading lookup: specific → medium → simple → uniform
-    - specific: vbin × terrain × dist × coastal × settle_density × forest_density
-    - medium:   vbin × terrain × dist × coastal
-    - simple:   terrain × dist
+_kernel_data_cache = None
+
+def load_kernel_data():
+    """Load kernel training data (per-seed distributions grouped by cell type)."""
+    global _kernel_data_cache
+    if _kernel_data_cache is not None:
+        return _kernel_data_cache
+    if not KERNEL_DATA_FILE.exists():
+        print("ADVARSEL: Ingen kernel_training_data.json — faller tilbake til lookup")
+        return None
+    data = json.loads(KERNEL_DATA_FILE.read_text())
+    _kernel_data_cache = data
+    print(f"Lastet kernel v1: {data['n_seeds']} seeds fra {data['n_rounds']} runder")
+    return _kernel_data_cache
+
+
+def kernel_predict(grid, settlements, vitality, urban, floor=0.001):
+    """
+    Kernel-weighted prediction (v9).
+    Vekter treningsdata med Gaussian kernel i (vitality, urban)-space.
+    Gir bedre prediksjon enn lookup-tabeller fordi:
+    1. Continuous vitality (ikke binnet til 4 kategorier)
+    2. Urban-akse fanger settlement-konsentrasjon uavhengig av vitality
+
+    Args:
+        grid: 40x40 terrain grid
+        settlements: list of {x, y, ...}
+        vitality: continuous survival rate (0-1)
+        urban: urbaniserings-score (log-ratio near/far settlement probability)
+        floor: minimum probability per class
+    Returns: (40, 40, 6) numpy array
+    """
+    kdata = load_kernel_data()
+    if kdata is None:
+        return None
+
+    bw_v = kdata.get("bw_vitality", 0.15)
+    bw_u = kdata.get("bw_urban", 2.0)
+    train_seeds = kdata["seeds"]
+
+    # Compute kernel weights for each training seed
+    weights = []
+    for ts in train_seeds:
+        vd = ts["vitality"] - vitality
+        ud = ts["urban"] - urban
+        w = np.exp(-((vd / bw_v) ** 2 + (ud / bw_u) ** 2))
+        weights.append(w)
+
+    # Build weighted average tables
+    tables = {}
+    for i, ts in enumerate(train_seeds):
+        w = weights[i]
+        if w < 0.01:
+            continue
+        for key, dist in ts["groups"].items():
+            if key not in tables:
+                tables[key] = {"ws": np.zeros(6), "w": 0.0}
+            tables[key]["ws"] += np.array(dist) * w
+            tables[key]["w"] += w
+
+    avg_tables = {}
+    for key, data in tables.items():
+        if data["w"] > 0.01:
+            avg_tables[key] = data["ws"] / data["w"]
+
+    # Predict
+    grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
+    H, W = grid_arr.shape if hasattr(grid_arr, 'shape') else (len(grid), len(grid[0]))
+    pred = np.zeros((H, W, NUM_CLASSES), dtype=float)
+
+    for y in range(H):
+        for x in range(W):
+            terrain = int(grid_arr[y][x]) if isinstance(grid_arr, np.ndarray) else grid[y][x]
+
+            if terrain == 10:
+                pred[y, x] = [1.0 - 5 * floor, floor, floor, floor, floor, floor]
+                continue
+            if terrain == 5:
+                pred[y, x] = [floor, floor, floor, floor, floor, 1.0 - 5 * floor]
+                continue
+
+            min_dist = 99
+            for s in settlements:
+                d = max(abs(y - s["y"]), abs(x - s["x"]))
+                if d < min_dist:
+                    min_dist = d
+
+            coastal = False
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < H and 0 <= nx < W:
+                        if (int(grid_arr[ny][nx]) if isinstance(grid_arr, np.ndarray) else grid[ny][nx]) == 10:
+                            coastal = True
+                            break
+                if coastal:
+                    break
+
+            tg = _terrain_group(terrain)
+            db = _dist_bin(min_dist)
+            c = int(coastal)
+            key = f"{tg}_{db}_{c}"
+
+            p = avg_tables.get(key)
+            if p is None:
+                p = np.ones(NUM_CLASSES) / NUM_CLASSES
+            else:
+                p = p.copy()
+
+            p = p * (1 - NUM_CLASSES * floor) + floor
+            p /= p.sum()
+            pred[y, x] = p
+
+    return pred
+
+
+def estimate_urban(grid, settlements, obs_grid):
+    """
+    Estimér urban-score fra en observert sluttilstand (GT eller simulert).
+    obs_grid: 40x40x6 sannsynligheter (fra /analysis eller /simulate viewport)
+
+    For live-bruk: kall denne med observasjoner fra noen viewports.
+    """
+    grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
+    obs_arr = np.array(obs_grid, dtype=float) if not isinstance(obs_grid, np.ndarray) else obs_grid
+    spos = [(s["x"], s["y"]) for s in settlements]
+
+    mass_near = 0.0
+    cells_near = 0
+    mass_far = 0.0
+    cells_far = 0
+
+    for y in range(40):
+        for x in range(40):
+            t = int(grid_arr[y, x])
+            if t in (10, 5):
+                continue
+            # Check if we have observation for this cell (non-zero)
+            if obs_arr[y, x].sum() < 0.01:
+                continue
+            md = min(max(abs(y - sy), abs(x - sx)) for sx, sy in spos)
+            sp = obs_arr[y, x, 1] + obs_arr[y, x, 2]  # settlement + port prob
+            if md <= 2:
+                mass_near += sp
+                cells_near += 1
+            elif md >= 5:
+                mass_far += sp
+                cells_far += 1
+
+    avg_near = mass_near / cells_near if cells_near > 0 else 0
+    avg_far = mass_far / cells_far if cells_far > 0 else 0
+    return np.log10(max(avg_near, 1e-6)) - np.log10(max(avg_far, 1e-6))
+
+
+def super_predict(grid, settlements, vbin, floor=None, vitality=None, urban=None):
+    """
+    Build prediction — v9 with kernel when vitality+urban available.
+    Falls back to v8 lookup+interp blend when kernel data unavailable.
+    Returns: (H, W, 6) numpy array
     """
     if floor is None:
         floor = VBIN_FLOOR.get(vbin, 0.001)
+
+    # v9: Use kernel prediction when both vitality and urban are available
+    if vitality is not None and urban is not None:
+        kpred = kernel_predict(grid, settlements, vitality, urban, floor=floor)
+        if kpred is not None:
+            return kpred
 
     model = load_model_tables()
     if model is None:
@@ -192,6 +394,10 @@ def super_predict(grid, settlements, vbin, floor=None):
     table_specific = model["specific"]
     table_medium = model["medium"]
     table_simple = model["simple"]
+
+    # Load interpolation tables (optional blend)
+    interp_tables = load_interp_tables() if vitality is not None else None
+    blend = interp_tables is not None
 
     grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
     H, W = grid_arr.shape if hasattr(grid_arr, 'shape') else (len(grid), len(grid[0]))
@@ -246,24 +452,38 @@ def super_predict(grid, settlements, vbin, floor=None):
             fdb = _forest_density_bin(n_forest_r2)
 
             # Cascading lookup: specific → medium → simple → uniform
-            p = None
+            p_lookup = None
 
             key_spec = f"{vbin}_{tg}_{db}_{c}_{sdb}_{fdb}"
             if key_spec in table_specific:
-                p = np.array(table_specific[key_spec]["distribution"])
+                p_lookup = np.array(table_specific[key_spec]["distribution"])
 
-            if p is None:
+            if p_lookup is None:
                 key_med = f"{vbin}_{tg}_{db}_{c}"
                 if key_med in table_medium:
-                    p = np.array(table_medium[key_med]["distribution"])
+                    p_lookup = np.array(table_medium[key_med]["distribution"])
 
-            if p is None:
+            if p_lookup is None:
                 key_simp = f"{tg}_{db}"
                 if key_simp in table_simple:
-                    p = np.array(table_simple[key_simp]["distribution"])
+                    p_lookup = np.array(table_simple[key_simp]["distribution"])
 
-            if p is None:
-                p = np.ones(NUM_CLASSES) / NUM_CLASSES
+            if p_lookup is None:
+                p_lookup = np.ones(NUM_CLASSES) / NUM_CLASSES
+
+            # Blend with interpolation if available
+            if blend:
+                interp_key = f"{tg}_{db}_{c}"
+                p_interp = _interp_predict(interp_key, vitality, interp_tables)
+                if p_interp is not None:
+                    # Geometric mean blend (α=0.5)
+                    p_lookup = np.clip(p_lookup, 1e-8, None)
+                    p_interp = np.clip(p_interp, 1e-8, None)
+                    p = np.sqrt(p_lookup * p_interp)
+                else:
+                    p = p_lookup
+            else:
+                p = p_lookup
 
             # Floor via Joakim's linear mixing method
             p = p * (1 - NUM_CLASSES * floor) + floor
@@ -275,11 +495,11 @@ def super_predict(grid, settlements, vbin, floor=None):
 
 def vitality_to_vbin(vitality):
     """Map vitality float to model bin.
-    Bins calibrated from 14 rounds × 5 seeds ground truth:
-    DEAD: vitality < 0.08 (rounds 3, 8, 10)
-    LOW:  vitality 0.08-0.20 (rare, only 1 seed in data)
-    MED:  vitality 0.20-0.35 (rounds 4, 9, 13)
-    HIGH: vitality >= 0.35 (rounds 1, 2, 5, 6, 7, 11, 12, 14)
+    Bins tuned for best backtest score.
+    DEAD: vitality < 0.08
+    LOW:  vitality 0.08-0.20
+    MED:  vitality 0.20-0.35
+    HIGH: vitality >= 0.35
     """
     if vitality < 0.08:
         return "DEAD"
@@ -1066,10 +1286,28 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
                 if si == n_seeds - 1:  # Bare print på siste
                     print(f"\n  Cross-seed: {n_keys} kategorier, {total_obs_count} obs")
 
-    # === FASE 6: RESUBMIT med super-kalibrering + riktig vbin ===
-    # Map world_type til vbin
+    # === FASE 6: RESUBMIT med kernel-prediksjon (vitality + urban) ===
     vbin = vitality_to_vbin(vitality)
-    print(f"\n  FASE 6: Super-calibration resubmit (vbin={vbin}, vitality={vitality:.3f})...")
+
+    # Estimér urban fra observasjonene vi allerede har
+    urban_est = None
+    for obs in observers:
+        if obs.observed.sum() > 0:
+            # Bygg observasjons-grid: settlement-sannsynlighet per celle
+            obs_grid = np.zeros((40, 40, 6))
+            for y in range(40):
+                for x in range(40):
+                    n = obs.observed[y, x]
+                    if n > 0:
+                        obs_grid[y, x] = obs.counts[y, x] / n
+            sd0 = seeds_data[0]
+            urban_est = estimate_urban(sd0.get("grid", []), sd0.get("settlements", []), obs_grid)
+            break
+
+    if urban_est is None:
+        urban_est = 1.0  # default: mid-range
+
+    print(f"\n  FASE 6: Kernel resubmit (vbin={vbin}, vitality={vitality:.3f}, urban={urban_est:.1f})...")
     results = []
     for si, obs in enumerate(observers):
         dm = ~obs.static_mask
@@ -1077,28 +1315,16 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
         dt = dm.sum()
         mo = obs.observed[dm].mean() if dt > 0 else 0
 
-        # Bygg super-calibration prior med riktig vbin
+        # Bygg kernel-prediksjon med vitality + urban
         sd = seeds_data[si]
         grid = sd.get("grid", [])
         settlements = sd.get("settlements", [])
-        super_pred = super_predict(grid, settlements, vbin)
+        super_pred = super_predict(grid, settlements, vbin, vitality=vitality, urban=urban_est)
 
         if super_pred is not None:
-            # Hvis vi har observasjoner, blend med super-prior
-            if do > 0:
-                # Bruk observasjoner for å justere super-prior
-                obs_pred = obs.build_prediction(apply_smoothing=False, world_type=opt_wtype)
-                # Vekt: super-prior er allerede veldig god, obs teller litt
-                # 70% super-prior + 30% obs-based (obs har mye støy med <10 obs/celle)
-                blend_pred = 0.70 * super_pred + 0.30 * obs_pred
-                # Renormaliser
-                blend_pred = np.maximum(blend_pred, 0.003)
-                blend_pred /= blend_pred.sum(axis=2, keepdims=True)
-                final_pred = blend_pred
-                reason = f"super+obs blend ({do} obs)"
-            else:
-                final_pred = super_pred
-                reason = f"super-prior only (vbin={vbin})"
+            # Bruk ren super-prior — obs-blend injiserer støy med <2 obs/celle
+            final_pred = super_pred
+            reason = f"kernel (vbin={vbin}, urban={urban_est:.1f})"
         else:
             # Fallback til gammel metode
             final_pred = obs.build_prediction(apply_smoothing=False, world_type=opt_wtype)

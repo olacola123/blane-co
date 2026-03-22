@@ -1,0 +1,33 @@
+{
+  "round_id": "b3a0be6b-b48b-419d-916a-b7a77fa58c4d",
+  "round_number": 21,
+  "weight": 2.786,
+  "results": [
+    {
+      "seed_index": 0,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 1,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 2,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 3,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 4,
+      "score": "?",
+      "prior_score": "?"
+    }
+  ],
+  "timestamp": "2026-03-22T06:05:45.275139+00:00"
+}

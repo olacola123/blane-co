@@ -4,26 +4,21 @@ Observation-Based Prior Adjustment for Astar Island
 Uses observations to adjust super-prior predictions per round.
 
 TESTED APPROACHES (14 rounds x 5 seeds = 70 seeds, oracle vitality):
-┌──────────────────────────────────────┬────────────┬──────────┐
-│ Approach                             │ Improvement│ % Better │
-├──────────────────────────────────────┼────────────┼──────────┤
-│ Group ratio (obs/prior per group)    │   -44.6    │    0%    │
-│ Group delta (obs - prior)            │    -1.8    │   17%    │
-│ Group Bayesian blend                 │    -0.5    │   19%    │
-│ Cross-seed evidence                  │    -0.2    │   23%    │
-│ Direct obs only (ps=50, ds=3)        │   +0.09    │   46%    │
-└──────────────────────────────────────┴────────────┴──────────┘
 
-Conclusion: The super-prior (83.8 avg) is so well-calibrated per
-(terrain, distance) group that observations only help at cell-level.
-Group-level adjustments always hurt because:
-1. Random viewports don't sample groups representatively
-2. Prior already captures the group-level pattern well
-3. Observation noise > round-specific signal at group level
+| Approach                          |  2 vp  |  5 vp  | 10 vp  |
+|-----------------------------------|--------|--------|--------|
+| Group ratio (obs/prior)           | -44.6  |   --   |   --   |
+| Group delta (obs - prior)         |  -1.8  |  -0.4  |  -0.4  |
+| Cross-seed evidence               |  -0.2  |   --   |  -0.2  |
+| Direct obs (ps=50, ds=3)          | +0.09  | +0.10  |  -0.07 |
+| Direct obs (ps=50, ds=1)          | +0.05  | +0.11  | +0.18  |
+| Direct obs (ps=100, ds=3)         | +0.07  | +0.13  | +0.18  |
 
-The ONLY value is direct cell-level Bayesian update: for cells we've
-actually observed, blend the observation with the prior. This gives
-+0.09 avg improvement (marginal but consistent).
+Key findings:
+- Group-level adjustments ALWAYS hurt (prior already well-calibrated per group)
+- Direct cell-level Bayesian update is the only thing that helps
+- More observations need MORE conservative blending (higher ps or lower ds)
+- Adaptive: ps = 50 + 5*n_viewports, ds = 3/sqrt(n_viewports) works well
 
 Usage:
     from obs_adjuster import ObsAdjuster
@@ -119,8 +114,8 @@ class ObsAdjuster:
                     self.obs_counts[y, x, int(cls)] += 1
                     self.obs_n[y, x] += 1
 
-    def get_adjusted_prediction(self, prior_strength: float = 50.0,
-                                 direct_obs_weight: float = 3.0) -> np.ndarray:
+    def get_adjusted_prediction(self, prior_strength: float = None,
+                                 direct_obs_weight: float = None) -> np.ndarray:
         """
         Build adjusted prediction tensor.
 
@@ -129,14 +124,28 @@ class ObsAdjuster:
 
         For unobserved cells: returns prior unchanged.
 
-        Args:
-            prior_strength: how many pseudocounts the prior is worth (higher = trust prior more)
-            direct_obs_weight: weight per observation (higher = trust observations more)
-                With 1-2 observations per cell: effective blend is obs/(obs+prior) ≈ 6-11%
+        If prior_strength/direct_obs_weight are None, uses adaptive values
+        based on observation density (more observations → more conservative).
 
         Returns:
             (H, W, 6) numpy array with adjusted probabilities
         """
+        # Adaptive parameter selection based on observation density
+        if prior_strength is None or direct_obs_weight is None:
+            n_observed = int((self.obs_n > 0).sum())
+            n_dynamic = int((~self.is_static).sum())
+            coverage = n_observed / max(n_dynamic, 1)
+            # Estimate effective viewports from coverage
+            # Each 15x15 viewport covers ~225 cells, map has ~1000 dynamic cells
+            est_viewports = max(1, coverage * n_dynamic / 200)
+
+            if prior_strength is None:
+                # More viewports → stronger prior (more conservative)
+                prior_strength = 50.0 + 5.0 * est_viewports
+            if direct_obs_weight is None:
+                # More viewports → lower obs weight per observation
+                direct_obs_weight = 3.0 / max(1.0, np.sqrt(est_viewports))
+
         pred = self.prior.copy()
 
         for y in range(self.H):
@@ -271,11 +280,9 @@ def backtest():
     print("=" * 70)
 
     param_configs = [
+        (None, None, "adaptive"),
         (50, 1.0, "ps50_ds1"),
         (50, 3.0, "ps50_ds3"),
-        (50, 5.0, "ps50_ds5"),
-        (30, 3.0, "ps30_ds3"),
-        (30, 5.0, "ps30_ds5"),
         (100, 3.0, "ps100_ds3"),
         (100, 5.0, "ps100_ds5"),
     ]
@@ -306,33 +313,34 @@ def backtest():
 
         print(f"    Best: {best_label} ({best_imp:+.3f})")
 
-    # Detailed per-round for best config (ps50, ds3, 2 viewports)
-    print(f"\n{'='*70}")
-    print("DETAILED: best config (ps=50, ds=3, 2 viewports)")
-    print(f"{'='*70}")
-    total_prior, total_adj = [], []
-    for rc in round_cache:
-        rp, ra = [], []
-        for se in rc["seeds"]:
-            rng = np.random.default_rng(se["seed_idx"] * 1000 + (rc["rnum"] if isinstance(rc["rnum"], int) else 0))
-            counts, observed = simulate_viewports(se["gt"], n_viewports=2, rng=rng)
-            adj = ObsAdjuster(se["grid"], se["settlements"], se["vbin"])
-            adj.add_observations(counts, observed)
-            pred = adj.get_adjusted_prediction(prior_strength=50, direct_obs_weight=3)
-            score = score_from_kl(weighted_kl(se["gt"], pred))
-            rp.append(se["prior_score"]); ra.append(score)
-        avg_p, avg_a = np.mean(rp), np.mean(ra)
-        total_prior.extend(rp); total_adj.extend(ra)
-        imp = avg_a - avg_p
-        sym = "+" if imp > 0 else ""
-        print(f"  R{rc['rnum']:>2} [{rc['vbin']:>4}]: prior={avg_p:5.1f}  adj={avg_a:5.1f}  {sym}{imp:.2f}")
+    # Detailed per-round for adaptive config
+    for n_vp in [2, 10]:
+        print(f"\n{'='*70}")
+        print(f"DETAILED: adaptive params, {n_vp} viewports")
+        print(f"{'='*70}")
+        total_prior, total_adj = [], []
+        for rc in round_cache:
+            rp, ra = [], []
+            for se in rc["seeds"]:
+                rng = np.random.default_rng(se["seed_idx"] * 1000 + (rc["rnum"] if isinstance(rc["rnum"], int) else 0))
+                counts, observed = simulate_viewports(se["gt"], n_viewports=n_vp, rng=rng)
+                adj = ObsAdjuster(se["grid"], se["settlements"], se["vbin"])
+                adj.add_observations(counts, observed)
+                pred = adj.get_adjusted_prediction()  # adaptive params
+                score = score_from_kl(weighted_kl(se["gt"], pred))
+                rp.append(se["prior_score"]); ra.append(score)
+            avg_p, avg_a = np.mean(rp), np.mean(ra)
+            total_prior.extend(rp); total_adj.extend(ra)
+            imp = avg_a - avg_p
+            sym = "+" if imp > 0 else ""
+            print(f"  R{rc['rnum']:>2} [{rc['vbin']:>4}]: prior={avg_p:5.1f}  adj={avg_a:5.1f}  {sym}{imp:.2f}")
 
-    avg_p, avg_a = np.mean(total_prior), np.mean(total_adj)
-    n_better = sum(1 for p,a in zip(total_prior,total_adj) if a>p)
-    print(f"\n  TOTAL: prior={avg_p:.2f}  adj={avg_a:.2f}  imp={avg_a-avg_p:+.3f}")
-    print(f"  Seeds improved: {n_better}/{len(total_prior)} ({100*n_better/len(total_prior):.0f}%)")
-    print(f"  Best seed imp:  {max(a-p for p,a in zip(total_prior,total_adj)):+.2f}")
-    print(f"  Worst seed imp: {min(a-p for p,a in zip(total_prior,total_adj)):+.2f}")
+        avg_p, avg_a = np.mean(total_prior), np.mean(total_adj)
+        n_better = sum(1 for p,a in zip(total_prior,total_adj) if a>p)
+        print(f"\n  TOTAL: prior={avg_p:.2f}  adj={avg_a:.2f}  imp={avg_a-avg_p:+.3f}")
+        print(f"  Seeds improved: {n_better}/{len(total_prior)} ({100*n_better/len(total_prior):.0f}%)")
+        print(f"  Best seed imp:  {max(a-p for p,a in zip(total_prior,total_adj)):+.2f}")
+        print(f"  Worst seed imp: {min(a-p for p,a in zip(total_prior,total_adj)):+.2f}")
     print("=" * 70)
 
 

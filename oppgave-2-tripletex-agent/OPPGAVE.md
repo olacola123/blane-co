@@ -62,10 +62,10 @@ Bygg en AI-agent som utfører regnskapsoppgaver via Tripletex API. Agenten motta
 | **Korrekthet** | Felt-for-felt verifisering, normalisert 0–1 |
 | **Tier-multiplikator** | T1 ×1, T2 ×2, T3 ×3 |
 | **Effektivitetsbonus** | Kun ved perfekt korrekthet (1.0). Kan opptil doble tier-scoren |
-| **Kall-effektivitet** | Færre API-kall vs best kjente → høyere bonus |
-| **Feilrenhet** | Færre 4xx-feil → høyere bonus |
+| **Kall-effektivitet** | Færre **write calls** (POST/PUT/DELETE/PATCH) vs best kjente → høyere bonus. **GET telles IKKE** — les fritt |
+| **Feilrenhet** | Færre 4xx-feil (400/404/422) → høyere bonus |
 | **Best score** | All-time best trackes. Dårlige runs senker aldri scoren |
-| **Rekalkuering** | Hver 12. time mot gjeldende benchmarks |
+| **Rekalkuering** | Hver 6. time mot gjeldende benchmarks. Korrekthet synker aldri, kun effektivitetsbonus påvirkes |
 | **Leaderboard** | Sum av best scores på tvers av alle 30 oppgavetyper |
 
 ### Scoring-eksempel (Tier 2)
@@ -87,14 +87,19 @@ Bygg en AI-agent som utfører regnskapsoppgaver via Tripletex API. Agenten motta
 | Tier 2 | Tidlig fredag | ×2 |
 | Tier 3 | Tidlig lørdag | ×3 |
 
+### Tier-eksempler fra docs
+- **T1**: Create employee, create customer (foundational)
+- **T2**: Invoice with payment, credit notes, project billing (multi-step)
+- **T3**: Bank reconciliation from CSV, error correction in ledger, year-end closing (complex scenarios)
+
 ---
 
 ## Rate Limits
 
 | Status | Samtidige | Per oppgave per dag |
 |--------|-----------|---------------------|
-| Verifisert | 3 | 5 |
-| Uverifisert | 1 | 2 |
+| Verifisert | 3 | 10 |
+| Uverifisert | 1 | 3 |
 
 ---
 
@@ -282,14 +287,16 @@ resp = await client.delete(f"/travelExpense/{expense_id}")
 
 ## Deploy-alternativer
 
-### Lokal med cloudflared (raskest for testing)
+### Lokal med ngrok (anbefalt)
 ```bash
 # Start server
 uvicorn main:app --host 0.0.0.0 --port 8000
 
 # I annet vindu — tunnel til internett
-npx cloudflared tunnel --url http://localhost:8000
+ngrok http 8000
 ```
+
+> **ADVARSEL**: Cloudflare Tunnel har hard 120s timeout. Tasks kan ta opptil 300s, så lengre tasks FEILER. Bruk ngrok.
 
 ### Cloud Run på GCP
 Se GCP-docs for deploy. Husk `--allow-unauthenticated` og `--timeout=300`.

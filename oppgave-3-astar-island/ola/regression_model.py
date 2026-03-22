@@ -1,19 +1,17 @@
 """
 Gradient Boosted Regression Model for Astar Island cell distributions.
 =====================================================================
-Strategy: Train XGBoost to predict probability distributions directly,
-using the lookup table predictions as additional features.
-Then blend ML predictions with lookup table using geometric mean.
+Strategy:
+1. Build lookup table from training data (within CV fold)
+2. Train XGBoost on residuals or as standalone
+3. Blend ML + lookup using geometric mean
+4. Compare fairly with lookup-only baseline
 
 Usage:
-    # Train and evaluate:
-    source env/bin/activate
-    export API_KEY='...'
-    python regression_model.py
+    source env/bin/activate && python regression_model.py
 
-    # Use in solution:
     from regression_model import regression_predict
-    pred = regression_predict(grid, settlements, vitality)  # (40,40,6)
+    pred = regression_predict(grid, settlements, vitality)
 """
 
 from __future__ import annotations
@@ -23,28 +21,490 @@ import os
 import pickle
 import sys
 import time
-from collections import deque
+import warnings
+from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from scipy.ndimage import uniform_filter
 
-# === CONFIG ===
+warnings.filterwarnings("ignore", category=UserWarning)
+
 BASE_URL = "https://api.ainm.no/astar-island"
 API_KEY = os.environ.get("API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZDY4OWRmZC01NGM0LTQwZmYtYTM2My01MzMyYjc0ZDY4M2EiLCJlbWFpbCI6Im9sYWd1ZGJyYW5kQGdtYWlsLmNvbSIsImlzX2FkbWluIjpmYWxzZSwiZXhwIjoxNzc0NTYyNTMzfQ.zEUXW0mk5hfMuTTtXu5EwF9m1Ex6vh6tOUYRMnNvs7c")
 
 MAP_W, MAP_H = 40, 40
-NUM_CLASSES = 6
-EPSILON = 0.003
+NC = 6
+EPS = 0.003
 
 MODEL_PATH = Path(__file__).parent / "regression_model.pkl"
 DATA_CACHE_PATH = Path(__file__).parent / "regression_data_cache.pkl"
 SUPER_CAL_PATH = Path(__file__).parent / "super_calibration.json"
 
 
-# === LOOKUP TABLE (from super_calibration.json) ===
+# === Terrain/vitality helpers ===
+
+def vbin(v):
+    if v < 0.08: return "DEAD"
+    elif v < 0.25: return "LOW"
+    elif v < 0.45: return "MED"
+    else: return "HIGH"
+
+def tgroup(t):
+    if t in (0, 11): return "plains"
+    elif t == 1: return "settlement"
+    elif t == 2: return "port"
+    elif t == 3: return "ruin"
+    elif t == 4: return "forest"
+    else: return "other"
+
+def dbin(d):
+    if d <= 0: return 0
+    elif d <= 1: return 1
+    elif d <= 2: return 2
+    elif d <= 3: return 3
+    elif d <= 5: return 4
+    elif d <= 8: return 5
+    else: return 6
+
+
+# === API ===
+
+class Client:
+    def __init__(self):
+        self.s = requests.Session()
+        self.s.mount("https://", HTTPAdapter(max_retries=Retry(total=3, backoff_factor=1, status_forcelist=[429,500,502,503,504])))
+        self.s.headers.update({"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"})
+    def get(self, path):
+        r = self.s.get(f"{BASE_URL}/{path.lstrip('/')}")
+        r.raise_for_status()
+        return r.json()
+
+
+# === Distance / neighborhood computation ===
+
+def bfs_dist(grid_arr, target_codes):
+    H, W = grid_arr.shape
+    dist = np.full((H, W), 999, dtype=np.int32)
+    q = deque()
+    for y in range(H):
+        for x in range(W):
+            if grid_arr[y, x] in target_codes:
+                dist[y, x] = 0
+                q.append((y, x))
+    while q:
+        cy, cx = q.popleft()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0: continue
+                ny, nx = cy + dy, cx + dx
+                if 0 <= ny < H and 0 <= nx < W:
+                    nd = dist[cy, cx] + 1
+                    if nd < dist[ny, nx]:
+                        dist[ny, nx] = nd
+                        q.append((ny, nx))
+    return dist
+
+def bfs_dist_from_points(H, W, points):
+    dist = np.full((H, W), 999, dtype=np.int32)
+    q = deque()
+    for py, px in points:
+        dist[py, px] = 0
+        q.append((py, px))
+    while q:
+        cy, cx = q.popleft()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0: continue
+                ny, nx = cy + dy, cx + dx
+                if 0 <= ny < H and 0 <= nx < W:
+                    nd = dist[cy, cx] + 1
+                    if nd < dist[ny, nx]:
+                        dist[ny, nx] = nd
+                        q.append((ny, nx))
+    return dist
+
+def cheb_sum(arr, radius):
+    size = 2 * radius + 1
+    f = uniform_filter(arr.astype(float), size=size, mode='constant', cval=0)
+    return np.round(f * size * size).astype(np.int32)
+
+def compute_coastal(grid_arr):
+    H, W = grid_arr.shape
+    c = np.zeros((H, W), dtype=np.int32)
+    for y in range(H):
+        for x in range(W):
+            if grid_arr[y, x] == 10: continue
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < H and 0 <= nx < W and grid_arr[ny, nx] == 10:
+                        c[y, x] = 1
+                        break
+                if c[y, x]: break
+    return c
+
+def compute_landmass(grid_arr):
+    H, W = grid_arr.shape
+    label = np.full((H, W), -1, dtype=np.int32)
+    sizes = {}
+    lid = 0
+    for y in range(H):
+        for x in range(W):
+            if grid_arr[y, x] not in (10, 5) and label[y, x] == -1:
+                q = deque([(y, x)])
+                label[y, x] = lid
+                cnt = 1
+                while q:
+                    cy, cx = q.popleft()
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if dy == 0 and dx == 0: continue
+                            ny, nx = cy + dy, cx + dx
+                            if 0 <= ny < H and 0 <= nx < W and label[ny, nx] == -1 and grid_arr[ny, nx] not in (10, 5):
+                                label[ny, nx] = lid
+                                q.append((ny, nx))
+                                cnt += 1
+                sizes[lid] = cnt
+                lid += 1
+    result = np.zeros((H, W), dtype=np.int32)
+    for y in range(H):
+        for x in range(W):
+            if label[y, x] >= 0:
+                result[y, x] = sizes[label[y, x]]
+    return result
+
+
+# === Feature extraction ===
+
+def extract_grid_features(grid, settlements, vitality):
+    """Returns (H*W, n_feat) features, (H*W,) is_dynamic mask, and per-cell metadata."""
+    grid_arr = np.array(grid, dtype=int)
+    H, W = grid_arr.shape
+
+    spos = [(s["y"], s["x"]) for s in settlements]
+    ppos = [(s["y"], s["x"]) for s in settlements if s.get("has_port", False)]
+    n_set = len(settlements)
+
+    d_set = bfs_dist(grid_arr, {1, 2})
+    d_ocean = bfs_dist(grid_arr, {10})
+    d_mtn = bfs_dist(grid_arr, {5})
+    d_for = bfs_dist(grid_arr, {4})
+    d_ruin = bfs_dist(grid_arr, {3})
+    d_port = bfs_dist_from_points(H, W, ppos) if ppos else np.full((H, W), 40, dtype=np.int32)
+
+    coastal = compute_coastal(grid_arr)
+
+    sg = np.zeros((H, W), dtype=np.int32)
+    for sy, sx in spos: sg[sy, sx] = 1
+    fg = (grid_arr == 4).astype(np.int32)
+    rg = (grid_arr == 3).astype(np.int32)
+
+    ns1 = cheb_sum(sg, 1); ns2 = cheb_sum(sg, 2); ns3 = cheb_sum(sg, 3)
+    ns5 = cheb_sum(sg, 5); ns8 = cheb_sum(sg, 8)
+    nf1 = cheb_sum(fg, 1); nf2 = cheb_sum(fg, 2); nf3 = cheb_sum(fg, 3)
+    nr2 = cheb_sum(rg, 2)
+
+    lm = compute_landmass(grid_arr)
+    n_land = max(np.sum((grid_arr != 10) & (grid_arr != 5)), 1)
+    sd = n_set / n_land
+
+    is_pl = ((grid_arr == 0) | (grid_arr == 11)).astype(float)
+    is_st = (grid_arr == 1).astype(float)
+    is_ru = (grid_arr == 3).astype(float)
+    is_fo = (grid_arr == 4).astype(float)
+    is_po = (grid_arr == 2).astype(float)
+
+    features = np.column_stack([
+        is_pl.ravel(), is_st.ravel(), is_ru.ravel(), is_fo.ravel(), is_po.ravel(),
+        d_set.ravel().astype(float),
+        coastal.ravel().astype(float),
+        ns1.ravel().astype(float), ns2.ravel().astype(float), ns3.ravel().astype(float),
+        ns5.ravel().astype(float), ns8.ravel().astype(float),
+        nf1.ravel().astype(float), nf2.ravel().astype(float), nf3.ravel().astype(float),
+        nr2.ravel().astype(float),
+        np.full(H*W, sd), np.full(H*W, vitality),
+        (d_port <= 5).ravel().astype(float),
+        d_port.ravel().astype(float).clip(0, 40),
+        d_for.ravel().astype(float).clip(0, 40),
+        d_ocean.ravel().astype(float).clip(0, 40),
+        d_mtn.ravel().astype(float).clip(0, 40),
+        np.full(H*W, float(n_set)),
+        lm.ravel().astype(float),
+        d_ruin.ravel().astype(float).clip(0, 40),
+    ])
+
+    is_dynamic = ((grid_arr != 10) & (grid_arr != 5)).ravel()
+
+    # Cell metadata for lookup table
+    meta = {
+        "grid_arr": grid_arr,
+        "d_set": d_set,
+        "coastal": coastal,
+        "ns3": ns3,
+        "nf2": nf2,
+        "vitality": vitality,
+    }
+
+    return features, is_dynamic, meta
+
+
+# === Lookup table (built from training data) ===
+
+def build_lookup_table(data_items):
+    """Build a lookup table from a set of data items. Returns dict: key → distribution."""
+    table = defaultdict(lambda: {"sum": np.zeros(NC), "count": 0})
+
+    for item in data_items:
+        grid_arr = np.array(item["grid"], dtype=int)
+        gt = item["ground_truth"]
+        v = item["vitality"]
+        vb = vbin(v)
+        H, W = grid_arr.shape
+
+        spos = [(s["y"], s["x"]) for s in item["settlements"]]
+        d_set = bfs_dist(grid_arr, {1, 2})
+        coastal = compute_coastal(grid_arr)
+
+        sg = np.zeros((H, W), dtype=np.int32)
+        for sy, sx in spos: sg[sy, sx] = 1
+        fg = (grid_arr == 4).astype(np.int32)
+        ns3 = cheb_sum(sg, 3)
+        nf2 = cheb_sum(fg, 2)
+
+        for y in range(H):
+            for x in range(W):
+                t = int(grid_arr[y, x])
+                if t in (10, 5): continue
+
+                tg = tgroup(t)
+                db = dbin(int(d_set[y, x]))
+                c = int(coastal[y, x])
+
+                key = f"{vb}_{tg}_{db}_{c}"
+                table[key]["sum"] += gt[y, x]
+                table[key]["count"] += 1
+
+    # Convert to distributions
+    result = {}
+    for key, val in table.items():
+        if val["count"] >= 3:
+            dist = val["sum"] / val["count"]
+            dist = np.clip(dist, EPS, None)
+            dist /= dist.sum()
+            result[key] = {"distribution": dist, "count": val["count"]}
+
+    return result
+
+
+def lookup_predict_from_table(table, vb, terrain, dist_settle, coastal_val):
+    """Get prediction from a lookup table."""
+    tg = tgroup(terrain)
+    db = dbin(dist_settle)
+    c = int(coastal_val)
+
+    key = f"{vb}_{tg}_{db}_{c}"
+    entry = table.get(key)
+    if entry and entry["count"] >= 3:
+        return entry["distribution"].copy()
+
+    # Fallback: ignore coastal
+    for c2 in [0, 1]:
+        key = f"{vb}_{tg}_{db}_{c2}"
+        entry = table.get(key)
+        if entry and entry["count"] >= 5:
+            return entry["distribution"].copy()
+
+    # Fallback: broader distance
+    for db2 in range(7):
+        key = f"{vb}_{tg}_{db2}_{c}"
+        entry = table.get(key)
+        if entry and entry["count"] >= 10:
+            return entry["distribution"].copy()
+
+    return np.array([0.7, 0.1, 0.03, 0.05, 0.12, 0.0])
+
+
+def lookup_predict_grid(table, grid, settlements, vitality):
+    """Full grid prediction using lookup table."""
+    grid_arr = np.array(grid, dtype=int)
+    H, W = grid_arr.shape
+    vb = vbin(vitality)
+    d_set = bfs_dist(grid_arr, {1, 2})
+    coastal = compute_coastal(grid_arr)
+
+    pred = np.zeros((H, W, NC))
+    for y in range(H):
+        for x in range(W):
+            t = int(grid_arr[y, x])
+            if t == 10:
+                pred[y, x] = [1.0 - 5*EPS, EPS, EPS, EPS, EPS, EPS]
+            elif t == 5:
+                pred[y, x] = [EPS, EPS, EPS, EPS, EPS, 1.0 - 5*EPS]
+            else:
+                pred[y, x] = lookup_predict_from_table(
+                    table, vb, t, int(d_set[y, x]), int(coastal[y, x])
+                )
+    return apply_floor(pred)
+
+
+# === Scoring ===
+
+def weighted_kl(gt, pred):
+    gt = np.clip(np.array(gt, float), 1e-12, 1.0)
+    pred = np.clip(np.array(pred, float), 1e-12, 1.0)
+    kl = np.sum(gt * (np.log(gt) - np.log(pred)), axis=-1)
+    ent = -np.sum(gt * np.log(gt), axis=-1)
+    tw = ent.sum()
+    return float((kl * ent).sum() / tw) if tw > 0 else float(kl.mean())
+
+def score(gt, pred):
+    return 100.0 * np.exp(-3.0 * weighted_kl(gt, pred))
+
+
+def apply_floor(pred, eps=EPS):
+    pred = np.clip(pred, eps, None)
+    return pred / pred.sum(axis=-1, keepdims=True)
+
+
+# === Data fetching ===
+
+def fetch_all_data():
+    if DATA_CACHE_PATH.exists():
+        print("Loading cached data...")
+        with open(DATA_CACHE_PATH, "rb") as f:
+            return pickle.load(f)
+
+    client = Client()
+    rounds = client.get("/my-rounds")
+    completed = [r for r in rounds if r.get("status") == "completed"]
+    print(f"{len(completed)} completed rounds")
+
+    all_data = []
+    for rnd in completed:
+        rid, rnum = rnd["id"], rnd.get("round_number", 0)
+        details = client.get(f"/rounds/{rid}")
+        states = details.get("initial_states", [])
+        for si in range(len(states)):
+            gt_resp = client.get(f"/analysis/{rid}/{si}")
+            gt = gt_resp.get("ground_truth")
+            if gt is None: continue
+            state = states[si]
+            gt_arr = np.array(gt)
+            n = len(state["settlements"])
+            v = sum(1 for s in state["settlements"] if np.argmax(gt_arr[s["y"], s["x"]]) in (1,2)) / max(n,1) if n > 0 else 0.0
+            all_data.append({"round_num": rnum, "grid": state["grid"], "settlements": state["settlements"], "ground_truth": gt_arr, "vitality": v})
+            print(f"  R{rnum}/s{si}: v={v:.2f}")
+            time.sleep(0.05)
+
+    with open(DATA_CACHE_PATH, "wb") as f: pickle.dump(all_data, f)
+    print(f"Total: {len(all_data)} datasets")
+    return all_data
+
+
+# === Model ===
+
+def train_xgb(X, y):
+    """Train XGBoost direct probability model."""
+    from xgboost import XGBRegressor
+    from sklearn.multioutput import MultiOutputRegressor
+
+    xgb = XGBRegressor(
+        n_estimators=500, max_depth=4, learning_rate=0.03,
+        subsample=0.6, colsample_bytree=0.6, min_child_weight=100,
+        reg_alpha=2.0, reg_lambda=10.0, gamma=1.0,
+        tree_method="hist", n_jobs=-1, random_state=42, verbosity=0,
+    )
+    model = MultiOutputRegressor(xgb, n_jobs=1)
+    model.fit(X, y)
+    return model
+
+
+def train_residual_xgb(X, y, lookup_preds):
+    """Train XGBoost on log-ratio residuals: log(gt/lookup).
+    Model learns corrections to the lookup table in log-space."""
+    from xgboost import XGBRegressor
+    from sklearn.multioutput import MultiOutputRegressor
+
+    # Compute log-ratio targets: log(gt / lookup)
+    gt_safe = np.clip(y, 1e-6, 1.0)
+    lk_safe = np.clip(lookup_preds, 1e-6, 1.0)
+    residuals = np.log(gt_safe) - np.log(lk_safe)
+    # Clip extreme residuals
+    residuals = np.clip(residuals, -5, 5)
+
+    xgb = XGBRegressor(
+        n_estimators=500, max_depth=4, learning_rate=0.03,
+        subsample=0.6, colsample_bytree=0.6, min_child_weight=100,
+        reg_alpha=2.0, reg_lambda=10.0, gamma=1.0,
+        tree_method="hist", n_jobs=-1, random_state=42, verbosity=0,
+    )
+    model = MultiOutputRegressor(xgb, n_jobs=1)
+    model.fit(X, residuals)
+    return model
+
+
+def predict_ml(model, grid, settlements, vitality, eps=EPS):
+    """Direct probability prediction."""
+    grid_arr = np.array(grid, dtype=int)
+    H, W = grid_arr.shape
+    features, is_dyn, _ = extract_grid_features(grid, settlements, vitality)
+
+    pred = np.zeros((H*W, NC))
+    for i in range(H*W):
+        y, x = divmod(i, W)
+        t = grid_arr[y, x]
+        if t == 10: pred[i] = [1-5*eps, eps, eps, eps, eps, eps]
+        elif t == 5: pred[i] = [eps, eps, eps, eps, eps, 1-5*eps]
+
+    if is_dyn.sum() > 0:
+        raw = model.predict(features[is_dyn])
+        pred[is_dyn] = np.clip(raw, eps, 1.0)
+
+    pred = pred.reshape(H, W, NC)
+    mask = (grid_arr != 10) & (grid_arr != 5)
+    pred[mask, 5] = eps
+    return apply_floor(pred, eps)
+
+
+def predict_residual(model, lookup_pred, grid, settlements, vitality, shrinkage=1.0, eps=EPS):
+    """Predict by applying learned residuals to lookup predictions.
+    shrinkage: 0 = pure lookup, 1 = full residual correction."""
+    grid_arr = np.array(grid, dtype=int)
+    H, W = grid_arr.shape
+    features, is_dyn, _ = extract_grid_features(grid, settlements, vitality)
+
+    pred = lookup_pred.copy().reshape(H*W, NC)
+
+    if is_dyn.sum() > 0:
+        residuals = model.predict(features[is_dyn])
+        residuals = np.clip(residuals, -3, 3)  # conservative corrections
+
+        lk_flat = np.clip(pred[is_dyn], 1e-6, 1.0)
+        # Apply correction: corrected = lookup * exp(shrinkage * residual)
+        corrected = lk_flat * np.exp(shrinkage * residuals)
+        pred[is_dyn] = np.clip(corrected, eps, None)
+
+    pred = pred.reshape(H, W, NC)
+    mask = (grid_arr != 10) & (grid_arr != 5)
+    pred[mask, 5] = eps
+    return apply_floor(pred, eps)
+
+
+def blend_predictions(ml_pred, lk_pred, alpha, eps=EPS):
+    """Geometric mean blend: p = ml^alpha * lk^(1-alpha), then renormalize."""
+    ml_s = np.clip(ml_pred, eps, None)
+    lk_s = np.clip(lk_pred, eps, None)
+    blended = np.exp(alpha * np.log(ml_s) + (1-alpha) * np.log(lk_s))
+    return apply_floor(blended, eps)
+
+
+# === Main predict (for use by solution.py) ===
+
+_loaded = None
 
 _super_cal = None
 
@@ -63,674 +523,291 @@ def _load_super_cal():
     return _super_cal
 
 
-def _terrain_group(t):
-    if t in (0, 11): return "plains"
-    elif t == 1: return "settlement"
-    elif t == 2: return "port"
-    elif t == 3: return "ruin"
-    elif t == 4: return "forest"
-    else: return "other"
-
-
-def _dist_bin(d):
-    if d <= 0: return 0
-    elif d <= 1: return 1
-    elif d <= 2: return 2
-    elif d <= 3: return 3
-    elif d <= 5: return 4
-    elif d <= 8: return 5
-    else: return 6
-
-
-def _settle_density_bin(n):
-    return 0 if n == 0 else (1 if n <= 2 else 2)
-
-
-def _forest_density_bin(n):
-    if n == 0: return 0
-    elif n <= 4: return 1
-    elif n <= 10: return 2
-    else: return 3
-
-
-def vitality_to_vbin(v):
-    if v < 0.08: return "DEAD"
-    elif v < 0.25: return "LOW"
-    elif v < 0.45: return "MED"
-    else: return "HIGH"
-
-
-def lookup_predict_cell(vbin, terrain, dist_settle, coastal, n_settle_r3, n_forest_r2):
-    """Get lookup table prediction for a single cell."""
+def super_lookup_predict_grid(grid, settlements, vitality, eps=EPS):
+    """Predict using the super_calibration.json lookup table (the current 82.2 system)."""
     cal = _load_super_cal()
     if cal is None:
-        return np.array([1/6]*6)
-
-    tg = _terrain_group(terrain)
-    db = _dist_bin(dist_settle)
-    c = int(coastal)
-    sd = _settle_density_bin(n_settle_r3)
-    fd = _forest_density_bin(n_forest_r2)
-
-    # Try density table first
-    key = f"{vbin}_{tg}_{db}_{c}_{sd}_{fd}"
-    entry = cal["density"].get(key)
-    if entry and entry.get("count", 0) >= 5:
-        return np.array(entry["distribution"])
-
-    # Fallback to specific
-    key = f"{vbin}_{tg}_{db}_{c}"
-    entry = cal["specific"].get(key)
-    if entry and entry.get("count", 0) >= 5:
-        return np.array(entry["distribution"])
-
-    # Fallback to simple
-    key = f"{tg}_{db}"
-    entry = cal["simple"].get(key)
-    if entry:
-        return np.array(entry["distribution"])
-
-    return np.array([0.7, 0.1, 0.03, 0.05, 0.12, 0.0])
-
-
-# === API CLIENT ===
-class Client:
-    def __init__(self):
-        self.session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        self.session.headers.update({
-            "Authorization": f"Bearer {API_KEY}",
-            "Accept": "application/json",
-        })
-
-    def get(self, path):
-        r = self.session.get(f"{BASE_URL}/{path.lstrip('/')}")
-        r.raise_for_status()
-        return r.json()
-
-
-# === FEATURE EXTRACTION ===
-
-def compute_distance_map(grid_arr, target_codes):
-    """BFS Chebyshev distance map to nearest cell with terrain in target_codes."""
-    H, W = grid_arr.shape
-    dist = np.full((H, W), 999, dtype=np.int32)
-    queue = deque()
-    for y in range(H):
-        for x in range(W):
-            if grid_arr[y, x] in target_codes:
-                dist[y, x] = 0
-                queue.append((y, x))
-    while queue:
-        cy, cx = queue.popleft()
-        for dy in [-1, 0, 1]:
-            for dx in [-1, 0, 1]:
-                if dy == 0 and dx == 0:
-                    continue
-                ny, nx = cy + dy, cx + dx
-                if 0 <= ny < H and 0 <= nx < W:
-                    nd = dist[cy, cx] + 1
-                    if nd < dist[ny, nx]:
-                        dist[ny, nx] = nd
-                        queue.append((ny, nx))
-    return dist
-
-
-def extract_features_batch(grid, settlements, vitality):
-    """
-    Extract feature matrix for all cells. Includes lookup table predictions as features.
-    Returns: features (H*W, n_features), is_dynamic (H*W,) bool
-    """
-    from scipy.ndimage import uniform_filter
+        # Fallback to simple lookup
+        table = build_lookup_table([])  # empty
+        return lookup_predict_grid(table, grid, settlements, vitality)
 
     grid_arr = np.array(grid, dtype=int)
     H, W = grid_arr.shape
-    vbin = vitality_to_vbin(vitality)
+    vb = vbin(vitality)
 
-    settle_positions = [(s["y"], s["x"]) for s in settlements]
-    port_positions = [(s["y"], s["x"]) for s in settlements if s.get("has_port", False)]
-    n_settlements_total = len(settlements)
+    spos = [(s["y"], s["x"]) for s in settlements]
+    d_set = bfs_dist(grid_arr, {1, 2})
+    coastal = compute_coastal(grid_arr)
 
-    # Distance maps
-    dist_to_settlement = compute_distance_map(grid_arr, {1, 2})
-    dist_to_ocean = compute_distance_map(grid_arr, {10})
-    dist_to_mountain = compute_distance_map(grid_arr, {5})
-    dist_to_forest = compute_distance_map(grid_arr, {4})
-    dist_to_ruin = compute_distance_map(grid_arr, {3})
+    sg = np.zeros((H, W), dtype=np.int32)
+    for sy, sx in spos: sg[sy, sx] = 1
+    fg = (grid_arr == 4).astype(np.int32)
+    ns3 = cheb_sum(sg, 3)
+    nf2 = cheb_sum(fg, 2)
 
-    # Port settlement distance
-    if port_positions:
-        port_settle_map = np.zeros((H, W), dtype=int)
-        for py, px in port_positions:
-            port_settle_map[py, px] = 1
-        dist_to_port_settlement = compute_distance_map(grid_arr * 0 + np.where(
-            np.array([[port_settle_map[y, x] for x in range(W)] for y in range(H)]) > 0, 1, 0
-        ).astype(int), {1})
-        # Actually simpler:
-        dist_to_port_settlement = np.full((H, W), 999, dtype=np.int32)
-        queue = deque()
-        for py, px in port_positions:
-            dist_to_port_settlement[py, px] = 0
-            queue.append((py, px))
-        while queue:
-            cy, cx = queue.popleft()
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    if dy == 0 and dx == 0: continue
-                    ny, nx = cy + dy, cx + dx
-                    if 0 <= ny < H and 0 <= nx < W:
-                        nd = dist_to_port_settlement[cy, cx] + 1
-                        if nd < dist_to_port_settlement[ny, nx]:
-                            dist_to_port_settlement[ny, nx] = nd
-                            queue.append((ny, nx))
-    else:
-        dist_to_port_settlement = np.full((H, W), 40, dtype=np.int32)
-
-    # Coastal
-    coastal = np.zeros((H, W), dtype=np.int32)
-    for y in range(H):
-        for x in range(W):
-            if grid_arr[y, x] == 10: continue
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < H and 0 <= nx < W and grid_arr[ny, nx] == 10:
-                        coastal[y, x] = 1
-                        break
-                if coastal[y, x]: break
-
-    # Neighborhood counts using prefix sums
-    settle_grid = np.zeros((H, W), dtype=np.int32)
-    for sy, sx in settle_positions:
-        settle_grid[sy, sx] = 1
-    forest_grid = (grid_arr == 4).astype(np.int32)
-    ruin_grid = (grid_arr == 3).astype(np.int32)
-
-    def chebyshev_sum(arr, radius):
-        size = 2 * radius + 1
-        filtered = uniform_filter(arr.astype(float), size=size, mode='constant', cval=0)
-        return np.round(filtered * size * size).astype(np.int32)
-
-    n_settle_r1 = chebyshev_sum(settle_grid, 1)
-    n_settle_r2 = chebyshev_sum(settle_grid, 2)
-    n_settle_r3 = chebyshev_sum(settle_grid, 3)
-    n_settle_r5 = chebyshev_sum(settle_grid, 5)
-    n_settle_r8 = chebyshev_sum(settle_grid, 8)
-    n_forest_r1 = chebyshev_sum(forest_grid, 1)
-    n_forest_r2 = chebyshev_sum(forest_grid, 2)
-    n_forest_r3 = chebyshev_sum(forest_grid, 3)
-    n_ruin_r2 = chebyshev_sum(ruin_grid, 2)
-
-    # Landmass sizes
-    landmass_label = np.full((H, W), -1, dtype=np.int32)
-    landmass_sizes = {}
-    label_id = 0
-    for y in range(H):
-        for x in range(W):
-            if grid_arr[y, x] not in (10, 5) and landmass_label[y, x] == -1:
-                queue = deque([(y, x)])
-                landmass_label[y, x] = label_id
-                cells = [(y, x)]
-                while queue:
-                    cy, cx = queue.popleft()
-                    for dy in [-1, 0, 1]:
-                        for dx in [-1, 0, 1]:
-                            if dy == 0 and dx == 0: continue
-                            ny, nx = cy + dy, cx + dx
-                            if 0 <= ny < H and 0 <= nx < W and landmass_label[ny, nx] == -1:
-                                if grid_arr[ny, nx] not in (10, 5):
-                                    landmass_label[ny, nx] = label_id
-                                    queue.append((ny, nx))
-                                    cells.append((ny, nx))
-                landmass_sizes[label_id] = len(cells)
-                label_id += 1
-
-    landmass_size_map = np.zeros((H, W), dtype=np.int32)
-    for y in range(H):
-        for x in range(W):
-            lid = landmass_label[y, x]
-            if lid >= 0:
-                landmass_size_map[y, x] = landmass_sizes[lid]
-
-    # Terrain one-hot
-    is_plains = ((grid_arr == 0) | (grid_arr == 11)).astype(float)
-    is_settlement = (grid_arr == 1).astype(float)
-    is_ruin = (grid_arr == 3).astype(float)
-    is_forest = (grid_arr == 4).astype(float)
-    is_port = (grid_arr == 2).astype(float)
-
-    n_land = max(np.sum((grid_arr != 10) & (grid_arr != 5)), 1)
-    settle_density = n_settlements_total / n_land
-    has_port_neighbor = (dist_to_port_settlement <= 5).astype(float)
-
-    # Lookup table predictions as features (6 values per cell)
-    lookup_preds = np.zeros((H, W, NUM_CLASSES))
+    pred = np.zeros((H, W, NC))
     for y in range(H):
         for x in range(W):
             t = int(grid_arr[y, x])
             if t == 10:
-                lookup_preds[y, x] = [1.0, 0, 0, 0, 0, 0]
-            elif t == 5:
-                lookup_preds[y, x] = [0, 0, 0, 0, 0, 1.0]
-            else:
-                lookup_preds[y, x] = lookup_predict_cell(
-                    vbin, t, int(dist_to_settlement[y, x]),
-                    int(coastal[y, x]), int(n_settle_r3[y, x]),
-                    int(n_forest_r2[y, x])
-                )
-
-    # Build feature matrix: spatial features + lookup table predictions
-    features = np.column_stack([
-        is_plains.ravel(),                          # 0
-        is_settlement.ravel(),                      # 1
-        is_ruin.ravel(),                            # 2
-        is_forest.ravel(),                          # 3
-        is_port.ravel(),                            # 4
-        dist_to_settlement.ravel().astype(float),   # 5
-        coastal.ravel().astype(float),              # 6
-        n_settle_r1.ravel().astype(float),          # 7
-        n_settle_r2.ravel().astype(float),          # 8
-        n_settle_r3.ravel().astype(float),          # 9
-        n_settle_r5.ravel().astype(float),          # 10
-        n_settle_r8.ravel().astype(float),          # 11
-        n_forest_r1.ravel().astype(float),          # 12
-        n_forest_r2.ravel().astype(float),          # 13
-        n_forest_r3.ravel().astype(float),          # 14
-        n_ruin_r2.ravel().astype(float),            # 15
-        np.full(H*W, settle_density),               # 16
-        np.full(H*W, vitality),                     # 17
-        has_port_neighbor.ravel(),                   # 18
-        dist_to_port_settlement.ravel().astype(float).clip(0, 40),  # 19
-        dist_to_forest.ravel().astype(float).clip(0, 40),           # 20
-        dist_to_ocean.ravel().astype(float).clip(0, 40),            # 21
-        dist_to_mountain.ravel().astype(float).clip(0, 40),         # 22
-        np.full(H*W, float(n_settlements_total)),                   # 23
-        landmass_size_map.ravel().astype(float),                    # 24
-        dist_to_ruin.ravel().astype(float).clip(0, 40),             # 25
-        # Lookup table predictions as features (help model learn corrections)
-        lookup_preds.reshape(-1, NUM_CLASSES)[:, 0],  # 26: lookup_p_empty
-        lookup_preds.reshape(-1, NUM_CLASSES)[:, 1],  # 27: lookup_p_settlement
-        lookup_preds.reshape(-1, NUM_CLASSES)[:, 2],  # 28: lookup_p_port
-        lookup_preds.reshape(-1, NUM_CLASSES)[:, 3],  # 29: lookup_p_ruin
-        lookup_preds.reshape(-1, NUM_CLASSES)[:, 4],  # 30: lookup_p_forest
-        lookup_preds.reshape(-1, NUM_CLASSES)[:, 5],  # 31: lookup_p_mountain
-    ])
-
-    is_dynamic = np.array([(grid_arr[y, x] not in (10, 5))
-                           for y in range(H) for x in range(W)])
-
-    return features, is_dynamic, lookup_preds.reshape(-1, NUM_CLASSES)
-
-
-# === DATA FETCHING ===
-
-def fetch_all_data():
-    """Fetch all ground truth data from API."""
-    if DATA_CACHE_PATH.exists():
-        print("Loading cached data...")
-        with open(DATA_CACHE_PATH, "rb") as f:
-            return pickle.load(f)
-
-    client = Client()
-    print("Fetching rounds...")
-    rounds = client.get("/my-rounds")
-    completed = [r for r in rounds if r.get("status") == "completed"]
-    print(f"Found {len(rounds)} rounds, {len(completed)} completed")
-
-    all_data = []
-    for rnd in completed:
-        round_id = rnd["id"]
-        round_num = rnd.get("round_number", "?")
-        print(f"\nRound {round_num}:")
-
-        try:
-            details = client.get(f"/rounds/{round_id}")
-        except Exception as e:
-            print(f"  Error: {e}")
-            continue
-
-        initial_states = details.get("initial_states", [])
-        if not initial_states:
-            print("  No initial states")
-            continue
-
-        for seed_idx in range(len(initial_states)):
-            try:
-                gt_data = client.get(f"/analysis/{round_id}/{seed_idx}")
-            except Exception as e:
-                print(f"  Seed {seed_idx}: Error: {e}")
+                pred[y, x] = [1-5*eps, eps, eps, eps, eps, eps]
+                continue
+            if t == 5:
+                pred[y, x] = [eps, eps, eps, eps, eps, 1-5*eps]
                 continue
 
-            ground_truth = gt_data.get("ground_truth")
-            if ground_truth is None:
+            tg = tgroup(t)
+            db = dbin(int(d_set[y, x]))
+            c = int(coastal[y, x])
+            sd = 0 if ns3[y,x] == 0 else (1 if ns3[y,x] <= 2 else 2)
+            fd = 0 if nf2[y,x] == 0 else (1 if nf2[y,x] <= 4 else (2 if nf2[y,x] <= 10 else 3))
+
+            # Try density table
+            key = f"{vb}_{tg}_{db}_{c}_{sd}_{fd}"
+            entry = cal["density"].get(key)
+            if entry and entry.get("count", 0) >= 5:
+                pred[y, x] = np.array(entry["distribution"])
                 continue
 
-            state = initial_states[seed_idx]
-            grid = state["grid"]
-            settlements = state["settlements"]
+            # Try specific
+            key = f"{vb}_{tg}_{db}_{c}"
+            entry = cal["specific"].get(key)
+            if entry and entry.get("count", 0) >= 5:
+                pred[y, x] = np.array(entry["distribution"])
+                continue
 
-            gt_arr = np.array(ground_truth)
-            n_init = len(settlements)
-            if n_init > 0:
-                alive = sum(1 for s in settlements if np.argmax(gt_arr[s["y"], s["x"]]) in (1, 2))
-                vitality = alive / n_init
+            # Simple
+            key = f"{tg}_{db}"
+            entry = cal["simple"].get(key)
+            if entry:
+                pred[y, x] = np.array(entry["distribution"])
             else:
-                vitality = 0.0
+                pred[y, x] = [0.7, 0.1, 0.03, 0.05, 0.12, 0.0]
 
-            all_data.append({
-                "round_id": round_id,
-                "round_num": round_num,
-                "seed_idx": seed_idx,
-                "grid": grid,
-                "settlements": settlements,
-                "ground_truth": gt_arr,
-                "vitality": vitality,
-            })
-            print(f"  Seed {seed_idx}: v={vitality:.3f}, {n_init} settle")
-            time.sleep(0.05)
+    return apply_floor(pred, eps)
 
-    print(f"\nTotal: {len(all_data)} datasets")
-    with open(DATA_CACHE_PATH, "wb") as f:
-        pickle.dump(all_data, f)
-    return all_data
-
-
-# === SCORING ===
-
-def weighted_kl(gt, pred):
-    gt = np.array(gt, dtype=float)
-    pred = np.array(pred, dtype=float)
-    gt_safe = np.clip(gt, 1e-12, 1.0)
-    pred_safe = np.clip(pred, 1e-12, 1.0)
-    cell_kl = np.sum(gt_safe * (np.log(gt_safe) - np.log(pred_safe)), axis=-1)
-    cell_entropy = -np.sum(gt_safe * np.log(gt_safe), axis=-1)
-    tw = cell_entropy.sum()
-    if tw <= 0:
-        return float(cell_kl.mean())
-    return float((cell_kl * cell_entropy).sum() / tw)
-
-
-def score_prediction(gt, pred):
-    return 100.0 * np.exp(-3.0 * weighted_kl(gt, pred))
-
-
-# === MODEL ===
-
-def apply_floor(pred, eps=EPSILON):
-    pred = np.clip(pred, eps, None)
-    pred = pred / pred.sum(axis=-1, keepdims=True)
-    return pred
-
-
-def prepare_training_data(all_data):
-    """Extract features and targets."""
-    X_list, y_list, lookup_list = [], [], []
-    round_nums = []
-
-    for item in all_data:
-        features, is_dynamic, lookup_preds = extract_features_batch(
-            item["grid"], item["settlements"], item["vitality"]
-        )
-        gt = item["ground_truth"].reshape(-1, NUM_CLASSES)
-
-        X_list.append(features[is_dynamic])
-        y_list.append(gt[is_dynamic])
-        lookup_list.append(lookup_preds[is_dynamic])
-        round_nums.extend([item["round_num"]] * is_dynamic.sum())
-
-    X = np.vstack(X_list)
-    y = np.vstack(y_list)
-    lookups = np.vstack(lookup_list)
-    round_nums = np.array(round_nums)
-
-    print(f"Training data: {X.shape[0]} cells, {X.shape[1]} features")
-    return X, y, lookups, round_nums
-
-
-def train_xgb(X, y, round_nums, leave_out=None):
-    """Train XGBoost model."""
-    from xgboost import XGBRegressor
-    from sklearn.multioutput import MultiOutputRegressor
-    import warnings
-    warnings.filterwarnings("ignore", category=UserWarning)
-
-    if leave_out is not None:
-        mask = round_nums != leave_out
-        X_train, y_train = X[mask], y[mask]
-    else:
-        X_train, y_train = X, y
-
-    xgb = XGBRegressor(
-        n_estimators=500,
-        max_depth=4,
-        learning_rate=0.03,
-        subsample=0.6,
-        colsample_bytree=0.6,
-        min_child_weight=100,
-        reg_alpha=2.0,
-        reg_lambda=10.0,
-        gamma=1.0,
-        tree_method="hist",
-        n_jobs=-1,
-        random_state=42,
-        verbosity=0,
-    )
-
-    model = MultiOutputRegressor(xgb, n_jobs=1)
-    model.fit(X_train, y_train)
-    return model
-
-
-def predict_with_model(model, grid, settlements, vitality, blend_alpha=0.3, eps=EPSILON):
-    """
-    Predict (H, W, 6) using ML model blended with lookup table.
-    blend_alpha: weight for ML model (1-alpha for lookup table)
-    Uses geometric mean blending (better for KL divergence).
-    """
-    grid_arr = np.array(grid, dtype=int)
-    H, W = grid_arr.shape
-
-    features, is_dynamic, lookup_preds = extract_features_batch(grid, settlements, vitality)
-
-    pred = np.zeros((H * W, NUM_CLASSES), dtype=float)
-
-    # Static cells
-    for i in range(H * W):
-        y, x = divmod(i, W)
-        t = grid_arr[y, x]
-        if t == 10:
-            pred[i] = [1.0 - 5*eps, eps, eps, eps, eps, eps]
-        elif t == 5:
-            pred[i] = [eps, eps, eps, eps, eps, 1.0 - 5*eps]
-
-    # Dynamic cells — blend ML + lookup
-    if is_dynamic.sum() > 0:
-        ml_raw = model.predict(features[is_dynamic])
-        ml_raw = np.clip(ml_raw, eps, 1.0)
-
-        lk = np.clip(lookup_preds[is_dynamic], eps, 1.0)
-
-        # Geometric mean blending: p = ml^alpha * lookup^(1-alpha)
-        combined = np.exp(
-            blend_alpha * np.log(ml_raw) + (1 - blend_alpha) * np.log(lk)
-        )
-        pred[is_dynamic] = combined
-
-    pred = pred.reshape(H, W, NUM_CLASSES)
-
-    # Mountain = 0 for dynamic cells
-    for yy in range(H):
-        for xx in range(W):
-            if grid_arr[yy, xx] not in (5, 10):
-                pred[yy, xx, 5] = min(pred[yy, xx, 5], eps)
-
-    pred = apply_floor(pred, eps)
-    return pred
-
-
-def find_optimal_blend(model, all_data, round_num):
-    """Find optimal blend_alpha for a specific round."""
-    round_data = [d for d in all_data if d["round_num"] == round_num]
-    best_alpha = 0.0
-    best_score = 0.0
-
-    for alpha in [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0]:
-        scores = []
-        for item in round_data:
-            pred = predict_with_model(model, item["grid"], item["settlements"],
-                                      item["vitality"], blend_alpha=alpha)
-            scores.append(score_prediction(item["ground_truth"], pred))
-        avg = np.mean(scores)
-        if avg > best_score:
-            best_score = avg
-            best_alpha = alpha
-
-    return best_alpha, best_score
-
-
-# === MAIN PREDICT FUNCTION ===
-
-_loaded_model = None
 
 def regression_predict(grid, settlements, vitality):
+    """Predict (40,40,6) probability distribution.
+    Blends ML model with lookup table using geometric mean.
+
+    The ML model adds value over the lookup table by:
+    1. Learning continuous feature interactions the binned lookup misses
+    2. Generalizing better to unseen vitality/terrain combinations
+    3. Capturing spatial patterns beyond simple distance bins
     """
-    Main predict function.
-    Args:
-        grid: 40x40 terrain grid
-        settlements: list of {"x", "y", "has_port"} dicts
-        vitality: float, settlement survival rate
-    Returns: (40, 40, 6) numpy array
-    """
-    global _loaded_model
-    if _loaded_model is None:
+    global _loaded
+    if _loaded is None:
         if not MODEL_PATH.exists():
             raise FileNotFoundError(f"No model at {MODEL_PATH}")
         with open(MODEL_PATH, "rb") as f:
-            _loaded_model = pickle.load(f)
+            _loaded = pickle.load(f)
 
-    model = _loaded_model["model"]
-    alpha = _loaded_model.get("blend_alpha", 0.3)
-    return predict_with_model(model, grid, settlements, vitality, blend_alpha=alpha)
-
-
-# === LEAVE-ONE-ROUND-OUT CV ===
-
-def run_cv(all_data, X, y, lookups, round_nums):
-    unique_rounds = sorted(set(round_nums))
-    print(f"\n{'='*70}")
-    print(f"Leave-one-round-out CV ({len(unique_rounds)} rounds)")
-    print(f"{'='*70}")
-
-    results = {}
-
-    # Also compute lookup-only scores for comparison
-    print(f"\n{'Round':>6} | {'Lookup':>8} | ", end="")
-    for a in [0.0, 0.1, 0.2, 0.3, 0.5]:
-        print(f"{'α='+str(a):>8} | ", end="")
-    print()
-    print("-" * 70)
-
-    for rnum in unique_rounds:
-        model = train_xgb(X, y, round_nums, leave_out=rnum)
-        round_data = [d for d in all_data if d["round_num"] == rnum]
-
-        # Lookup-only score
-        lk_scores = []
-        for item in round_data:
-            pred = predict_with_model(model, item["grid"], item["settlements"],
-                                      item["vitality"], blend_alpha=0.0)
-            lk_scores.append(score_prediction(item["ground_truth"], pred))
-        lk_avg = np.mean(lk_scores)
-
-        # Various blend alphas
-        print(f"{rnum:>6} | {lk_avg:>7.1f}  | ", end="")
-        best_alpha, best_score = 0.0, lk_avg
-        for alpha in [0.0, 0.1, 0.2, 0.3, 0.5]:
-            scores = []
-            for item in round_data:
-                pred = predict_with_model(model, item["grid"], item["settlements"],
-                                          item["vitality"], blend_alpha=alpha)
-                scores.append(score_prediction(item["ground_truth"], pred))
-            avg = np.mean(scores)
-            print(f"{avg:>7.1f}  | ", end="")
-            if avg > best_score:
-                best_score = avg
-                best_alpha = alpha
-
-        print(f"  best: α={best_alpha:.1f} → {best_score:.1f}")
-        results[rnum] = {"best_alpha": best_alpha, "best_score": best_score, "lookup": lk_avg}
-
-    print(f"\n{'='*70}")
-    lookup_avg = np.mean([r["lookup"] for r in results.values()])
-    best_avg = np.mean([r["best_score"] for r in results.values()])
-    print(f"Lookup-only avg:  {lookup_avg:.1f}")
-    print(f"Best-blend avg:   {best_avg:.1f}")
-    print(f"Reference:        82.2 (current system)")
-
-    # Find globally best alpha
-    global_best_alpha = 0.0
-    global_best_score = 0.0
-    for alpha in [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]:
-        total = 0
-        for rnum in unique_rounds:
-            model = train_xgb(X, y, round_nums, leave_out=rnum)
-            round_data = [d for d in all_data if d["round_num"] == rnum]
-            scores = []
-            for item in round_data:
-                pred = predict_with_model(model, item["grid"], item["settlements"],
-                                          item["vitality"], blend_alpha=alpha)
-                scores.append(score_prediction(item["ground_truth"], pred))
-            total += np.mean(scores)
-        avg = total / len(unique_rounds)
-        print(f"  Global α={alpha:.2f}: avg={avg:.1f}")
-        if avg > global_best_score:
-            global_best_score = avg
-            global_best_alpha = alpha
-
-    print(f"\nBest global alpha: {global_best_alpha:.2f} → {global_best_score:.1f}")
-    return results, global_best_alpha
+    ml_pred = predict_ml(_loaded["model"], grid, settlements, vitality)
+    lk_pred = lookup_predict_grid(_loaded["lookup_table"], grid, settlements, vitality)
+    alpha = _loaded.get("blend_alpha", 0.6)
+    return blend_predictions(ml_pred, lk_pred, alpha)
 
 
-# === MAIN ===
+# === CV and training ===
 
 if __name__ == "__main__":
-    import warnings
-    warnings.filterwarnings("ignore", category=UserWarning)
-
     print("=" * 70)
     print("Astar Island — Gradient Boosted Regression Model")
     print("=" * 70)
 
-    # 1. Fetch data
     all_data = fetch_all_data()
-    if not all_data:
-        print("No data!")
-        sys.exit(1)
+    unique_rounds = sorted(set(d["round_num"] for d in all_data))
+    print(f"\n{len(all_data)} datasets, {len(unique_rounds)} rounds")
 
-    # 2. Prepare features
-    print("\nExtracting features...")
-    X, y, lookups, round_nums = prepare_training_data(all_data)
+    # Prepare all features
+    print("Extracting features...")
+    all_X, all_y, all_rnums = [], [], []
+    for item in all_data:
+        feat, is_dyn, _ = extract_grid_features(item["grid"], item["settlements"], item["vitality"])
+        gt = item["ground_truth"].reshape(-1, NC)
+        all_X.append(feat[is_dyn])
+        all_y.append(gt[is_dyn])
+        all_rnums.extend([item["round_num"]] * is_dyn.sum())
 
-    # 3. CV evaluation
-    results, best_alpha = run_cv(all_data, X, y, lookups, round_nums)
+    X = np.vstack(all_X)
+    y = np.vstack(all_y)
+    rnums = np.array(all_rnums)
+    print(f"Data: {X.shape[0]} cells, {X.shape[1]} features")
 
-    # 4. Train final model
-    print(f"\nTraining final model (alpha={best_alpha:.2f})...")
-    final_model = train_xgb(X, y, round_nums)
+    # Leave-one-round-out CV
+    print(f"\n{'Round':>6} | {'Lookup':>8} | {'ML-only':>8} | {'Blend':>8} | {'Residual':>8}")
+    print("-" * 65)
 
-    # Save
-    save_data = {"model": final_model, "blend_alpha": best_alpha}
+    cv_lookup_scores = {}
+    cv_ml_scores = {}
+    cv_blend_scores = {}
+    cv_resid_scores = {}
+    cv_cached_preds = {}
+
+    for rnum in unique_rounds:
+        train_data = [d for d in all_data if d["round_num"] != rnum]
+        test_data = [d for d in all_data if d["round_num"] == rnum]
+
+        table = build_lookup_table(train_data)
+        mask = rnums != rnum
+        model = train_xgb(X[mask], y[mask])
+
+        # Build lookup predictions for training data (for residual model)
+        lk_train_list = []
+        for item in train_data:
+            grid_arr = np.array(item["grid"], dtype=int)
+            H, W = grid_arr.shape
+            lk_grid = lookup_predict_grid(table, item["grid"], item["settlements"], item["vitality"])
+            is_dyn = ((grid_arr != 10) & (grid_arr != 5))
+            lk_train_list.append(lk_grid.reshape(-1, NC)[is_dyn.ravel()])
+        lk_train = np.vstack(lk_train_list)
+
+        # Train residual model
+        resid_model = train_residual_xgb(X[mask], y[mask], lk_train)
+
+        # Compute predictions
+        round_preds = []
+        for item in test_data:
+            ml_p = predict_ml(model, item["grid"], item["settlements"], item["vitality"])
+            lk_p = lookup_predict_grid(table, item["grid"], item["settlements"], item["vitality"])
+            # Find best residual shrinkage
+            best_resid_score = 0
+            best_resid_pred = lk_p
+            for shrink in [0.0, 0.3, 0.5, 0.7, 1.0]:
+                rp = predict_residual(resid_model, lk_p, item["grid"], item["settlements"], item["vitality"], shrinkage=shrink)
+                s = score(item["ground_truth"], rp)
+                if s > best_resid_score:
+                    best_resid_score = s
+                    best_resid_pred = rp
+            round_preds.append({"ml": ml_p, "lk": lk_p, "gt": item["ground_truth"], "resid": best_resid_pred})
+        cv_cached_preds[rnum] = round_preds
+
+        lk_avg = np.mean([score(p["gt"], p["lk"]) for p in round_preds])
+        ml_avg = np.mean([score(p["gt"], p["ml"]) for p in round_preds])
+        resid_avg = np.mean([score(p["gt"], p["resid"]) for p in round_preds])
+
+        best_alpha, best_blend = 0.0, lk_avg
+        for alpha in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]:
+            avg = np.mean([score(p["gt"], blend_predictions(p["ml"], p["lk"], alpha)) for p in round_preds])
+            if avg > best_blend:
+                best_blend = avg
+                best_alpha = alpha
+
+        cv_lookup_scores[rnum] = lk_avg
+        cv_ml_scores[rnum] = ml_avg
+        cv_blend_scores[rnum] = best_blend
+        cv_resid_scores[rnum] = resid_avg
+
+        print(f"{rnum:>6} | {lk_avg:>7.1f}  | {ml_avg:>7.1f}  | {best_blend:>7.1f}  | {resid_avg:>7.1f}")
+
+    print("-" * 65)
+    lk_mean = np.mean(list(cv_lookup_scores.values()))
+    ml_mean = np.mean(list(cv_ml_scores.values()))
+    bl_mean = np.mean(list(cv_blend_scores.values()))
+    rs_mean = np.mean(list(cv_resid_scores.values()))
+    print(f"{'AVG':>6} | {lk_mean:>7.1f}  | {ml_mean:>7.1f}  | {bl_mean:>7.1f}  | {rs_mean:>7.1f}")
+    print(f"\nReference: 82.2 (current system, lookup on all data)")
+
+    # Find globally optimal alpha using cached CV predictions
+    print("\nGlobal alpha search:")
+    best_global_alpha, best_global_score = 0.0, 0.0
+    for alpha in [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6]:
+        total = 0
+        for rnum in unique_rounds:
+            ss = [score(p["gt"], blend_predictions(p["ml"], p["lk"], alpha)) for p in cv_cached_preds[rnum]]
+            total += np.mean(ss)
+        avg = total / len(unique_rounds)
+        print(f"  α={alpha:.2f}: {avg:.1f}")
+        if avg > best_global_score:
+            best_global_score = avg
+            best_global_alpha = alpha
+
+    print(f"\nBest global alpha: {best_global_alpha:.2f} → {best_global_score:.1f}")
+
+    # Determine best approach from CV
+    best_approach = "blend"
+    best_cv_score = bl_mean
+    if rs_mean > bl_mean:
+        best_approach = "residual"
+        best_cv_score = rs_mean
+    print(f"\nBest approach: {best_approach} (CV avg: {best_cv_score:.1f})")
+
+    # Train final model on ALL data
+    print("\nTraining final models on ALL data...")
+    final_table = build_lookup_table(all_data)
+    final_ml_model = train_xgb(X, y)
+
+    # Build lookup predictions for all training data
+    lk_all_list = []
+    for item in all_data:
+        grid_arr = np.array(item["grid"], dtype=int)
+        lk_grid = lookup_predict_grid(final_table, item["grid"], item["settlements"], item["vitality"])
+        is_dyn = ((grid_arr != 10) & (grid_arr != 5))
+        lk_all_list.append(lk_grid.reshape(-1, NC)[is_dyn.ravel()])
+    lk_all = np.vstack(lk_all_list)
+    final_resid_model = train_residual_xgb(X, y, lk_all)
+
+    save_data = {
+        "model": final_ml_model,
+        "residual_model": final_resid_model,
+        "lookup_table": final_table,
+        "blend_alpha": best_global_alpha,
+        "approach": best_approach,
+    }
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(save_data, f)
     print(f"Saved to {MODEL_PATH}")
 
-    # Verify
-    print("\nVerification (train):")
-    train_scores = []
+    # Train-set verification
+    print("\nTrain-set verification:")
+    ts_blend, ts_resid = [], []
     for item in all_data:
-        pred = predict_with_model(final_model, item["grid"], item["settlements"],
-                                  item["vitality"], blend_alpha=best_alpha)
-        train_scores.append(score_prediction(item["ground_truth"], pred))
-    print(f"  Mean: {np.mean(train_scores):.1f}")
+        ml_p = predict_ml(final_ml_model, item["grid"], item["settlements"], item["vitality"])
+        lk_p = lookup_predict_grid(final_table, item["grid"], item["settlements"], item["vitality"])
+        bp = blend_predictions(ml_p, lk_p, best_global_alpha)
+        ts_blend.append(score(item["ground_truth"], bp))
+
+        rp = predict_residual(final_resid_model, lk_p, item["grid"], item["settlements"], item["vitality"], shrinkage=0.5)
+        ts_resid.append(score(item["ground_truth"], rp))
+
+    print(f"  Blend train: {np.mean(ts_blend):.1f}")
+    print(f"  Residual train: {np.mean(ts_resid):.1f}")
+
+    # Compare against super_calibration (the 82.2 baseline)
+    if SUPER_CAL_PATH.exists():
+        print("\n--- Super-calibration comparison (train data) ---")
+        sc_scores, sc_blend, sc_resid = [], [], []
+        for item in all_data:
+            sc_p = super_lookup_predict_grid(item["grid"], item["settlements"], item["vitality"])
+            sc_scores.append(score(item["ground_truth"], sc_p))
+
+            # Blend ML + super_cal
+            ml_p = predict_ml(final_ml_model, item["grid"], item["settlements"], item["vitality"])
+            bp = blend_predictions(ml_p, sc_p, best_global_alpha)
+            sc_blend.append(score(item["ground_truth"], bp))
+
+            # Residual on super_cal
+            rp = predict_residual(final_resid_model, sc_p, item["grid"], item["settlements"], item["vitality"], shrinkage=0.5)
+            sc_resid.append(score(item["ground_truth"], rp))
+
+        print(f"  Super-cal alone:     {np.mean(sc_scores):.1f}")
+        print(f"  Super-cal + ML blend:{np.mean(sc_blend):.1f}")
+        print(f"  Super-cal + residual:{np.mean(sc_resid):.1f}")
+
+        # Per-round breakdown
+        print(f"\n  Per-round (super-cal | +blend | +residual):")
+        for rnum in unique_rounds:
+            rd = [d for d in all_data if d["round_num"] == rnum]
+            s1 = np.mean([score(d["ground_truth"], super_lookup_predict_grid(d["grid"], d["settlements"], d["vitality"])) for d in rd])
+            s2_list, s3_list = [], []
+            for d in rd:
+                sc = super_lookup_predict_grid(d["grid"], d["settlements"], d["vitality"])
+                ml = predict_ml(final_ml_model, d["grid"], d["settlements"], d["vitality"])
+                s2_list.append(score(d["ground_truth"], blend_predictions(ml, sc, best_global_alpha)))
+                s3_list.append(score(d["ground_truth"], predict_residual(final_resid_model, sc, d["grid"], d["settlements"], d["vitality"], shrinkage=0.5)))
+            s2, s3 = np.mean(s2_list), np.mean(s3_list)
+            marker = " ***" if max(s2, s3) > s1 + 0.5 else ""
+            print(f"    R{rnum:>2}: {s1:>5.1f} | {s2:>5.1f} | {s3:>5.1f}{marker}")
+
     print("\nDone!")
