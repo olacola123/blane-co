@@ -825,15 +825,31 @@ Expense account mapping: 6540=office/kontor, 6340=IT/data, 6500=supplies, 7100=v
 
     elif task_type == "receipt_voucher":
         return f"""═══ RECEIPT VOUCHER TASK ═══
-POST /ledger/voucher:
-  Debit: expense account by WHAT WAS BOUGHT (not department!), vatType=ingoing 25% from context, department:{{id:DEPT_ID}}
-  Credit: account 1920 (bank), vatType={{id:0}}
-Account mapping by purchase type:
-  6340=IT/USB/PC/laptop/electronics, 7140=travel/tog/fly/taxi, 7100=vehicle/bensin/parkering
-  6500=office supplies/papir, 6540=furniture/møbler, 7350=entertainment/restaurant/gave
-  6900=telefon, 6300=rent/husleie, 7700=maintenance, 6800=other
-Food items: use INGOING 15% vatType from context (not 25%)!
-Use RECEIPT DATE from prompt, not today!"""
+1. Extract from receipt IMAGE: amount (incl. VAT), date, what was purchased.
+2. Find department by name from EXISTING DEPARTMENTS (e.g. "Produksjon", "Drift").
+3. POST /ledger/voucher:
+   Debit: expense account, amountGross=AMOUNT_INCL_VAT, vatType=from context (see below), department:{{id:DEPT_ID}}
+   Credit: account 1920 (bank), amountGross=-AMOUNT_INCL_VAT, vatType={{id:NO_VAT_ID}}
+   Both rows need: date=RECEIPT_DATE, row number.
+
+EXPENSE ACCOUNT MAPPING:
+  6340=IT/USB/PC/laptop/electronics/hub
+  7140=train/fly/taxi/hotel/accommodation
+  7100=vehicle/fuel/bensin/parkering
+  6500=office supplies/papir/kontormateriell
+  6540=furniture/møbler/inventar
+  7350=restaurant/entertainment/gave
+  6900=telefon/mobil
+  6300=rent/husleie
+  7700=maintenance/repair
+  6800=other (default)
+
+VAT TREATMENT:
+  Electronics/IT/office/furniture/general: use INGOING 25% vatType from context
+  Food/restaurant: use INGOING 15% vatType from context
+  Train/bus/public transport (tog/buss/t-bane): use OUTSIDE 0% or NO VAT vatType (transport is exempt)
+  Taxi: use INGOING 25%
+  Use RECEIPT DATE (from image), NOT today!"""
 
     elif task_type == "salary":
         return f"""═══ SALARY TASK ═══
@@ -1184,7 +1200,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v55-agent", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v56-agent", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
@@ -1374,7 +1390,7 @@ def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "v55-agent",
+            "version": "v56-agent",
             "model": CLAUDE_MODEL,
             "task_type": task_type,
             "prompt_fingerprint": _prompt_fingerprint(prompt),
