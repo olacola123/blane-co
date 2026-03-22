@@ -454,9 +454,9 @@ def prefetch_context(session: requests.Session, base_url: str, task_type: str = 
 
     # Account lookups — all common accounts
     acct_numbers = [1200, 1209, 1210, 1219, 1230, 1240, 1250, 1500, 1700, 1710, 1920,
-                    2000, 2050, 2400, 2600, 2710, 2780, 2800, 2900, 2920, 2940, 2960,
+                    2000, 2050, 2400, 2600, 2710, 2770, 2780, 2800, 2900, 2920, 2940, 2960,
                     3000, 3400, 4000, 4300,
-                    5000, 5400,
+                    5000, 5400, 5800, 5900,
                     6010, 6020, 6100, 6200, 6300, 6340, 6350, 6500, 6540, 6700, 6800, 6900,
                     7000, 7100, 7140, 7300, 7350, 7400, 7500, 7700,
                     8060, 8160, 8300, 8700, 8900]
@@ -840,19 +840,20 @@ Use RECEIPT DATE from prompt, not today!"""
 1. Find employee by email in EXISTING EMPLOYEES. PUT with name+dateOfBirth from context.
 2. If hasEmployment=NO: create division+employment+details. If YES: skip to 3.
 3. POST /employee/standardTime {{employee:{{id:X}}, fromDate:"{today}", hoursPerDay:7.5}} (ignore 422)
-4. Try POST /salary/paySlip. If returns 404/403 (salary module disabled): use manual voucher:
-   POST /ledger/voucher — use SEPARATE postings for base salary and each bonus/allowance:
-   REQUIRED postings (use account IDs from LEDGER ACCOUNT IDS):
-   - Debit  5000: base_salary (row 1, vatType:NO_VAT)
-   - Debit  5000: bonus_amount (row 2, vatType:NO_VAT) — if there is a bonus, post separately!
-   - Credit 2780: tax = 30% × (base + bonus) (row 3, vatType:NO_VAT) — "Skattetrekk"
-   - Credit 2960: holiday_pay = 10.2% × (base + bonus) (row 4, vatType:NO_VAT) — "Feriepenger"
-   - Credit 1920: net_pay = (base + bonus) - tax - holiday_pay (row 5, vatType:NO_VAT)
-   ALSO post employer contribution:
-   - Debit  5400: aga = 14.1% × (base + bonus) (row 6, vatType:NO_VAT) — "Arbeidsgiveravgift"
-   - Credit 2780: aga (row 7, vatType:NO_VAT)
-   Each row MUST have: account:{{id:X}}, amountGross, amountGrossCurrency, date, row, vatType
-   ALL postings must balance to 0!
+4. Try POST /salary/paySlip. If returns 404/403 (salary module disabled): use manual voucher.
+
+MANUAL SALARY VOUCHER — CRITICAL: Credit 2780, NOT 1920!
+POST /ledger/voucher (use account IDs from LEDGER ACCOUNT IDS):
+  Row 1: Debit  5000: base_salary  (vatType:NO_VAT) — "Grunnlønn"
+  Row 2: Debit  5000: bonus_amount (vatType:NO_VAT) — SEPARATE row for bonus! (if no bonus, skip)
+  Row 3: Credit 2780: -(base_salary + bonus_amount) (vatType:NO_VAT) — "Skyldig lønn"
+  Row 4: Debit  5400: 14.1% × (base + bonus) (vatType:NO_VAT) — "Arbeidsgiveravgift"
+  Row 5: Credit 2780: -(14.1% × (base + bonus)) (vatType:NO_VAT) — "Skyldig AGA"
+
+All rows need: account:{{id:X}}, amountGross, amountGrossCurrency, date:"{today}", row:N, vatType:{{id:NO_VAT_ID}}
+Postings MUST balance to 0. Use NO_VAT vatType id from context.
+Do NOT credit account 1920 — this is a salary accrual, not a direct bank payment.
+
 5. After successful paySlip: PUT /:calculate → PUT /:createPayment → STOP."""
 
     elif task_type == "travel_expense":
@@ -1183,7 +1184,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v54-agent", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v55-agent", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
@@ -1373,7 +1374,7 @@ def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "v54-agent",
+            "version": "v55-agent",
             "model": CLAUDE_MODEL,
             "task_type": task_type,
             "prompt_fingerprint": _prompt_fingerprint(prompt),
