@@ -864,12 +864,18 @@ GET /travelExpense → if APPROVED: PUT /travelExpense/ID/:unapprove → DELETE 
 
     elif task_type == "bank_recon":
         return f"""═══ BANK RECONCILIATION ═══
-1. Parse CSV: date, amount, reference per transaction
-2. GET /invoice?invoiceDateFrom=2020-01-01&invoiceDateTo=2027-01-01&fields=id,invoiceNumber,amount,amountOutstanding,customer(id,name)
-3. Incoming payments (positive): match by amount/ref → PUT /invoice/ID/:payment
-4. Outgoing payments (negative): POST /ledger/voucher — debit 2400 (with supplier), credit 1920
-   Look up account IDs from LEDGER ACCOUNT IDS — never hardcode id:0!
-5. Handle partial payments. Match by reference/name if exact amount doesn't match."""
+1. Read ALL CSV rows: date, amount, reference, description, counterparty.
+2. GET /invoice?invoiceDateFrom=2020-01-01&invoiceDateTo=2027-01-01&count=100&fields=id,invoiceNumber,amount,amountOutstanding,customer(id,name)
+3. For EACH incoming payment (positive amount):
+   - Match CSV reference/description against invoice invoiceNumber (e.g. "Faktura 1001" → invoiceNumber=1001)
+   - If found: PUT /invoice/ID/:payment?paymentDate=DATE&paymentTypeId=PAYMENT_TYPE_ID&paidAmount=AMOUNT
+   - paidAmount = bank amount (may be partial — use amountOutstanding if smaller)
+4. For EACH outgoing payment (negative amount):
+   - Find supplier by name: check EXISTING CUSTOMERS (isSupplier=true) or GET /customer?name=...
+   - POST /ledger/voucher: debit 2400 (+abs_amount, supplier:{{id:SUPPLIER_ID}}, vatType:NO_VAT), credit 1920 (-abs_amount, vatType:NO_VAT)
+   - Use account IDs from LEDGER ACCOUNT IDS — NEVER hardcode id:0
+5. Handle ALL transactions from the CSV — do not skip any.
+PAYMENT_TYPE_ID: use first ID from INVOICE PAYMENT TYPES in context."""
 
     elif task_type == "ledger_audit":
         return """═══ LEDGER AUDIT ═══
@@ -1173,7 +1179,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v52-agent", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v53-agent", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
@@ -1363,7 +1369,7 @@ def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "v52-agent",
+            "version": "v53-agent",
             "model": CLAUDE_MODEL,
             "task_type": task_type,
             "prompt_fingerprint": _prompt_fingerprint(prompt),
