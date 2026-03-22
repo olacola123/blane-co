@@ -840,15 +840,19 @@ Use RECEIPT DATE from prompt, not today!"""
 1. Find employee by email in EXISTING EMPLOYEES. PUT with name+dateOfBirth from context.
 2. If hasEmployment=NO: create division+employment+details. If YES: skip to 3.
 3. POST /employee/standardTime {{employee:{{id:X}}, fromDate:"{today}", hoursPerDay:7.5}} (ignore 422)
-4. Try POST /salary/paySlip with employee, date, year, month, and specifications inline.
-   If paySlip returns 404/403: fall back to manual voucher:
-   POST /ledger/voucher with:
-     Debit 5000 (lønn): gross salary amount
-     Credit 2780 (skattetrekk): tax deduction (~30%)
-     Credit 2960 (feriepenger): holiday pay accrual (10.2% of gross, 12% if over 60)
-     Credit 1920 (bank): net payment (gross - tax)
-     Debit 5400 (arbeidsgiveravgift): 14.1% of gross
-     Credit 2780 (skyldig AGA): 14.1% of gross
+4. Try POST /salary/paySlip. If returns 404/403 (salary module disabled): use manual voucher:
+   POST /ledger/voucher — use SEPARATE postings for base salary and each bonus/allowance:
+   REQUIRED postings (use account IDs from LEDGER ACCOUNT IDS):
+   - Debit  5000: base_salary (row 1, vatType:NO_VAT)
+   - Debit  5000: bonus_amount (row 2, vatType:NO_VAT) — if there is a bonus, post separately!
+   - Credit 2780: tax = 30% × (base + bonus) (row 3, vatType:NO_VAT) — "Skattetrekk"
+   - Credit 2960: holiday_pay = 10.2% × (base + bonus) (row 4, vatType:NO_VAT) — "Feriepenger"
+   - Credit 1920: net_pay = (base + bonus) - tax - holiday_pay (row 5, vatType:NO_VAT)
+   ALSO post employer contribution:
+   - Debit  5400: aga = 14.1% × (base + bonus) (row 6, vatType:NO_VAT) — "Arbeidsgiveravgift"
+   - Credit 2780: aga (row 7, vatType:NO_VAT)
+   Each row MUST have: account:{{id:X}}, amountGross, amountGrossCurrency, date, row, vatType
+   ALL postings must balance to 0!
 5. After successful paySlip: PUT /:calculate → PUT /:createPayment → STOP."""
 
     elif task_type == "travel_expense":
@@ -944,15 +948,14 @@ All account IDs from context."""
             extra = "\nAfter creating: GET /project/ID → PUT /project/ID with isFixedPrice:true, fixedprice:AMT, version:V. KEEP original number!"
         return f"""═══ PROJECT TASK ═══
 1. Make employee EXTENDED: PUT /employee/ID with userType:"EXTENDED" + version
-2. POST /employee/entitlement {{employee:{{id:X}}, entitlementId:45, customer:{{id:{company_id or 'COMPANY_ID'}}}}}
-   POST /employee/entitlement {{employee:{{id:X}}, entitlementId:10, customer:{{id:{company_id or 'COMPANY_ID'}}}}}
+2. PUT /employee/entitlement/:grantClientEntitlementsByTemplate?employeeId=ID&customerId={company_id or 'COMPANY_ID'}&template=ACCOUNTING (try; ignore errors)
 3. Find/create customer
 4. POST /project {{name, startDate:"{today}", projectManager:{{id:EMP}}, customer:{{id:CUST}}}} — no "number"!{extra}"""
 
     elif task_type == "project_lifecycle":
         return f"""═══ PROJECT LIFECYCLE ═══
 Full cycle: employees → customer → project → hours → supplier cost → customer invoice.
-1. For EACH employee: PUT to EXTENDED + entitlements(45+10).
+1. For EACH employee: PUT to EXTENDED. Try PUT /employee/entitlement/:grantClientEntitlementsByTemplate (ignore errors).
 2. POST /customer (or use existing)
 3. POST /project
 4. GET /project/ID?fields=id,projectActivities(id,activity(id,name)) to find valid activity IDs
@@ -967,7 +970,8 @@ Full cycle: employees → customer → project → hours → supplier cost → c
    (Do both in one response)
 2. Group postings by account number. Sum amounts per month. Find 3 accounts with LARGEST ABSOLUTE INCREASE (Feb_sum - Jan_sum).
    Use the ACCOUNT NAME from the posting as the project name.
-3. Make employee EXTENDED + entitlements (45+10, customer:{{id:{company_id or 'COMPANY'}}})
+3. Make employee EXTENDED: PUT /employee/ID with userType:"EXTENDED" + version.
+   Try: PUT /employee/entitlement/:grantClientEntitlementsByTemplate?employeeId=ID&customerId={company_id or 'COMPANY_ID'}&template=ACCOUNTING (ignore errors)
 4. For EACH of the 3 accounts — do project + activity in ONE response:
    POST /project {{name:"ACCOUNT_NAME", startDate:"{today}", projectManager:{{id:EMPLOYEE_ID}}}}
    POST /activity {{name:"ACCOUNT_NAME", activityType:"GENERAL_ACTIVITY", isGeneral:true}}
@@ -1179,7 +1183,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v53-agent", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v54-agent", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
@@ -1369,7 +1373,7 @@ def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "v53-agent",
+            "version": "v54-agent",
             "model": CLAUDE_MODEL,
             "task_type": task_type,
             "prompt_fingerprint": _prompt_fingerprint(prompt),
