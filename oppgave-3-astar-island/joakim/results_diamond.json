@@ -1,0 +1,33 @@
+{
+  "round_id": "b0f9d1bf-4b71-4e6e-816c-19c718d29056",
+  "round_number": 18,
+  "results": [
+    {
+      "seed_index": 0,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 1,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 2,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 3,
+      "score": "?",
+      "prior_score": "?"
+    },
+    {
+      "seed_index": 4,
+      "score": "?",
+      "prior_score": "?"
+    }
+  ],
+  "history_dir": "/Users/joakim_ruud/Documents/koding/nmiai-2026/oppgave-3-astar-island/joakim/history/b0f9d1bf-4b71-4e6e-816c-19c718d29056",
+  "timestamp": "2026-03-21T23:28:43"
+}

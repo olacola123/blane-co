@@ -1,14 +1,18 @@
 """
-Ola's Astar Island Solver v6 — Optimal observation + type detection
+Ola's Astar Island Solver v8 — Soft regime inference
 =====================================================================
-Forbedringer over v5:
-1. 4-type detection: DEAD/STABLE/BOOM_SPREAD/BOOM_CONC (n_settlements + survival)
-2. Joakim-inspirert alpha decay (3.5 → 0.85 → 0.35 → 0.15)
-3. Continuous blending fra blending.py (eliminerer cliff ved type-grenser)
-4. Kontinuerlig cross-seed (oppdateres etter hver seed, ikke bare på slutten)
-5. Prior-only safety submit (kan resubmitte med obs)
-6. Entropy-vektet query plassering (hybrid settlement + entropy)
-7. Adaptiv floor: skarpere (0.002) for observerte/statiske, bredere (0.008) for usikre
+Forbedringer over v6/v7:
+1. Soft regime blending: smooth transitions between DEAD/STABLE/BOOM priors
+2. Multi-signal fingerprint: survival + ruin + empty + forest rates
+3. Diagnostic probes across 4 seeds (not 2) for better regime inference
+4. Global recalibration instead of aggressive cell-level observation updates
+5. Reduced cross-seed aggressiveness (50% max, was 80%)
+6. Prior-only safety submit med soft-blended default
+
+Bevart fra v6:
+- Safety submit → probe → observe → cross-seed → resubmit pipeline
+- Optimerte calibration tabeller (calibration_optimized.json)
+- Floor/renormalisering/robuste defaults
 
 Bruk:
     export API_KEY='din-jwt-token'
@@ -68,8 +72,6 @@ CALIBRATION_4TYPE_FILE = Path(__file__).parent / "calibration_4type.json"
 CALIBRATION_OPT_FILE = Path(__file__).parent / "calibration_optimized.json"
 SUPER_CALIBRATION_FILE = Path(__file__).parent / "super_calibration.json"
 MODEL_TABLES_FILE = Path(__file__).parent / "model_tables.json"
-INTERP_TABLES_FILE = Path(__file__).parent / "interp_tables.json"
-KERNEL_DATA_FILE = Path(__file__).parent / "kernel_training_data.json"
 LEARNING_FILE = Path(__file__).parent / "learning_state.json"
 
 # Terrain code → terrain group for optimized tables
@@ -98,13 +100,13 @@ def load_optimized_calibration():
 
 
 # === SUPER-CALIBRATION ===
-# Built from 17 rounds × 5 seeds = 85 GT datasets, 115k data points
+# Built from 14 rounds × 5 seeds = 70 GT datasets, 95k data points
 # Features: vitality_bin × terrain_group × dist_bin × coastal × settle_density × forest_density
 
 _model_cache = None
 
 def load_model_tables():
-    """Load lookup tables (17 rounds × 5 seeds)."""
+    """Load new model tables (built from 14 rounds × 5 seeds = 70 GT datasets)."""
     global _model_cache
     if _model_cache is not None:
         return _model_cache
@@ -120,50 +122,8 @@ def load_model_tables():
     n_spec = len(_model_cache["specific"])
     n_med = len(_model_cache["medium"])
     n_simp = len(_model_cache["simple"])
-    print(f"Lastet model v8: {n_spec} specific + {n_med} medium + {n_simp} simple entries")
+    print(f"Lastet model v7: {n_spec} specific + {n_med} medium + {n_simp} simple entries")
     return _model_cache
-
-
-_interp_cache = None
-
-def load_interp_tables():
-    """Load continuous vitality interpolation tables."""
-    global _interp_cache
-    if _interp_cache is not None:
-        return _interp_cache
-    if not INTERP_TABLES_FILE.exists():
-        print("ADVARSEL: Ingen interp_tables.json")
-        return None
-    data = json.loads(INTERP_TABLES_FILE.read_text())
-    _interp_cache = data.get("tables", {})
-    print(f"Lastet interp v1: {len(_interp_cache)} grupper")
-    return _interp_cache
-
-
-def _interp_predict(key, vitality, interp_tables):
-    """Interpoler distribution for gitt key og vitality."""
-    if key not in interp_tables:
-        return None
-    points = interp_tables[key]
-    if len(points) < 2:
-        return np.array(points[0]["distribution"])
-
-    vits = [p["vitality"] for p in points]
-    # Clamp til range
-    if vitality <= vits[0]:
-        return np.array(points[0]["distribution"])
-    if vitality >= vits[-1]:
-        return np.array(points[-1]["distribution"])
-
-    # Lineær interpolasjon
-    for i in range(len(vits) - 1):
-        if vits[i] <= vitality <= vits[i + 1]:
-            t = (vitality - vits[i]) / (vits[i + 1] - vits[i])
-            d0 = np.array(points[i]["distribution"])
-            d1 = np.array(points[i + 1]["distribution"])
-            return d0 * (1 - t) + d1 * t
-
-    return np.array(points[-1]["distribution"])
 
 
 # Also keep old super_calibration as fallback
@@ -215,177 +175,19 @@ def _forest_density_bin(n):
     else: return 3
 
 
-# === KERNEL PREDICTION (v9) ===
-# Bruker continuous vitality + urban for å vekte treningsdata
-
-_kernel_data_cache = None
-
-def load_kernel_data():
-    """Load kernel training data (per-seed distributions grouped by cell type)."""
-    global _kernel_data_cache
-    if _kernel_data_cache is not None:
-        return _kernel_data_cache
-    if not KERNEL_DATA_FILE.exists():
-        print("ADVARSEL: Ingen kernel_training_data.json — faller tilbake til lookup")
-        return None
-    data = json.loads(KERNEL_DATA_FILE.read_text())
-    _kernel_data_cache = data
-    print(f"Lastet kernel v1: {data['n_seeds']} seeds fra {data['n_rounds']} runder")
-    return _kernel_data_cache
-
-
-def kernel_predict(grid, settlements, vitality, urban, floor=0.001):
+def super_predict(grid, settlements, vbin, floor=None):
     """
-    Kernel-weighted prediction (v9).
-    Vekter treningsdata med Gaussian kernel i (vitality, urban)-space.
-    Gir bedre prediksjon enn lookup-tabeller fordi:
-    1. Continuous vitality (ikke binnet til 4 kategorier)
-    2. Urban-akse fanger settlement-konsentrasjon uavhengig av vitality
-
-    Args:
-        grid: 40x40 terrain grid
-        settlements: list of {x, y, ...}
-        vitality: continuous survival rate (0-1)
-        urban: urbaniserings-score (log-ratio near/far settlement probability)
-        floor: minimum probability per class
-    Returns: (40, 40, 6) numpy array
-    """
-    kdata = load_kernel_data()
-    if kdata is None:
-        return None
-
-    bw_v = kdata.get("bw_vitality", 0.15)
-    bw_u = kdata.get("bw_urban", 2.0)
-    train_seeds = kdata["seeds"]
-
-    # Compute kernel weights for each training seed
-    weights = []
-    for ts in train_seeds:
-        vd = ts["vitality"] - vitality
-        ud = ts["urban"] - urban
-        w = np.exp(-((vd / bw_v) ** 2 + (ud / bw_u) ** 2))
-        weights.append(w)
-
-    # Build weighted average tables
-    tables = {}
-    for i, ts in enumerate(train_seeds):
-        w = weights[i]
-        if w < 0.01:
-            continue
-        for key, dist in ts["groups"].items():
-            if key not in tables:
-                tables[key] = {"ws": np.zeros(6), "w": 0.0}
-            tables[key]["ws"] += np.array(dist) * w
-            tables[key]["w"] += w
-
-    avg_tables = {}
-    for key, data in tables.items():
-        if data["w"] > 0.01:
-            avg_tables[key] = data["ws"] / data["w"]
-
-    # Predict
-    grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
-    H, W = grid_arr.shape if hasattr(grid_arr, 'shape') else (len(grid), len(grid[0]))
-    pred = np.zeros((H, W, NUM_CLASSES), dtype=float)
-
-    for y in range(H):
-        for x in range(W):
-            terrain = int(grid_arr[y][x]) if isinstance(grid_arr, np.ndarray) else grid[y][x]
-
-            if terrain == 10:
-                pred[y, x] = [1.0 - 5 * floor, floor, floor, floor, floor, floor]
-                continue
-            if terrain == 5:
-                pred[y, x] = [floor, floor, floor, floor, floor, 1.0 - 5 * floor]
-                continue
-
-            min_dist = 99
-            for s in settlements:
-                d = max(abs(y - s["y"]), abs(x - s["x"]))
-                if d < min_dist:
-                    min_dist = d
-
-            coastal = False
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < H and 0 <= nx < W:
-                        if (int(grid_arr[ny][nx]) if isinstance(grid_arr, np.ndarray) else grid[ny][nx]) == 10:
-                            coastal = True
-                            break
-                if coastal:
-                    break
-
-            tg = _terrain_group(terrain)
-            db = _dist_bin(min_dist)
-            c = int(coastal)
-            key = f"{tg}_{db}_{c}"
-
-            p = avg_tables.get(key)
-            if p is None:
-                p = np.ones(NUM_CLASSES) / NUM_CLASSES
-            else:
-                p = p.copy()
-
-            p = p * (1 - NUM_CLASSES * floor) + floor
-            p /= p.sum()
-            pred[y, x] = p
-
-    return pred
-
-
-def estimate_urban(grid, settlements, obs_grid):
-    """
-    Estimér urban-score fra en observert sluttilstand (GT eller simulert).
-    obs_grid: 40x40x6 sannsynligheter (fra /analysis eller /simulate viewport)
-
-    For live-bruk: kall denne med observasjoner fra noen viewports.
-    """
-    grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
-    obs_arr = np.array(obs_grid, dtype=float) if not isinstance(obs_grid, np.ndarray) else obs_grid
-    spos = [(s["x"], s["y"]) for s in settlements]
-
-    mass_near = 0.0
-    cells_near = 0
-    mass_far = 0.0
-    cells_far = 0
-
-    for y in range(40):
-        for x in range(40):
-            t = int(grid_arr[y, x])
-            if t in (10, 5):
-                continue
-            # Check if we have observation for this cell (non-zero)
-            if obs_arr[y, x].sum() < 0.01:
-                continue
-            md = min(max(abs(y - sy), abs(x - sx)) for sx, sy in spos)
-            sp = obs_arr[y, x, 1] + obs_arr[y, x, 2]  # settlement + port prob
-            if md <= 2:
-                mass_near += sp
-                cells_near += 1
-            elif md >= 5:
-                mass_far += sp
-                cells_far += 1
-
-    avg_near = mass_near / cells_near if cells_near > 0 else 0
-    avg_far = mass_far / cells_far if cells_far > 0 else 0
-    return np.log10(max(avg_near, 1e-6)) - np.log10(max(avg_far, 1e-6))
-
-
-def super_predict(grid, settlements, vbin, floor=None, vitality=None, urban=None):
-    """
-    Build prediction — v9 with kernel when vitality+urban available.
-    Falls back to v8 lookup+interp blend when kernel data unavailable.
+    Build prediction using model v7 tables (14 rounds × 5 seeds = 95k data points).
+    vbin: "DEAD", "LOW", "MED", "HIGH"
     Returns: (H, W, 6) numpy array
+
+    Cascading lookup: specific → medium → simple → uniform
+    - specific: vbin × terrain × dist × coastal × settle_density × forest_density
+    - medium:   vbin × terrain × dist × coastal
+    - simple:   terrain × dist
     """
     if floor is None:
         floor = VBIN_FLOOR.get(vbin, 0.001)
-
-    # v9: Use kernel prediction when both vitality and urban are available
-    if vitality is not None and urban is not None:
-        kpred = kernel_predict(grid, settlements, vitality, urban, floor=floor)
-        if kpred is not None:
-            return kpred
 
     model = load_model_tables()
     if model is None:
@@ -394,10 +196,6 @@ def super_predict(grid, settlements, vbin, floor=None, vitality=None, urban=None
     table_specific = model["specific"]
     table_medium = model["medium"]
     table_simple = model["simple"]
-
-    # Load interpolation tables (optional blend)
-    interp_tables = load_interp_tables() if vitality is not None else None
-    blend = interp_tables is not None
 
     grid_arr = np.array(grid, dtype=int) if not isinstance(grid, np.ndarray) else grid
     H, W = grid_arr.shape if hasattr(grid_arr, 'shape') else (len(grid), len(grid[0]))
@@ -452,38 +250,24 @@ def super_predict(grid, settlements, vbin, floor=None, vitality=None, urban=None
             fdb = _forest_density_bin(n_forest_r2)
 
             # Cascading lookup: specific → medium → simple → uniform
-            p_lookup = None
+            p = None
 
             key_spec = f"{vbin}_{tg}_{db}_{c}_{sdb}_{fdb}"
             if key_spec in table_specific:
-                p_lookup = np.array(table_specific[key_spec]["distribution"])
+                p = np.array(table_specific[key_spec]["distribution"])
 
-            if p_lookup is None:
+            if p is None:
                 key_med = f"{vbin}_{tg}_{db}_{c}"
                 if key_med in table_medium:
-                    p_lookup = np.array(table_medium[key_med]["distribution"])
+                    p = np.array(table_medium[key_med]["distribution"])
 
-            if p_lookup is None:
+            if p is None:
                 key_simp = f"{tg}_{db}"
                 if key_simp in table_simple:
-                    p_lookup = np.array(table_simple[key_simp]["distribution"])
+                    p = np.array(table_simple[key_simp]["distribution"])
 
-            if p_lookup is None:
-                p_lookup = np.ones(NUM_CLASSES) / NUM_CLASSES
-
-            # Blend with interpolation if available
-            if blend:
-                interp_key = f"{tg}_{db}_{c}"
-                p_interp = _interp_predict(interp_key, vitality, interp_tables)
-                if p_interp is not None:
-                    # Geometric mean blend (α=0.5)
-                    p_lookup = np.clip(p_lookup, 1e-8, None)
-                    p_interp = np.clip(p_interp, 1e-8, None)
-                    p = np.sqrt(p_lookup * p_interp)
-                else:
-                    p = p_lookup
-            else:
-                p = p_lookup
+            if p is None:
+                p = np.ones(NUM_CLASSES) / NUM_CLASSES
 
             # Floor via Joakim's linear mixing method
             p = p * (1 - NUM_CLASSES * floor) + floor
@@ -495,11 +279,11 @@ def super_predict(grid, settlements, vbin, floor=None, vitality=None, urban=None
 
 def vitality_to_vbin(vitality):
     """Map vitality float to model bin.
-    Bins tuned for best backtest score.
-    DEAD: vitality < 0.08
-    LOW:  vitality 0.08-0.20
-    MED:  vitality 0.20-0.35
-    HIGH: vitality >= 0.35
+    Bins calibrated from 14 rounds × 5 seeds ground truth:
+    DEAD: vitality < 0.08 (rounds 3, 8, 10)
+    LOW:  vitality 0.08-0.20 (rare, only 1 seed in data)
+    MED:  vitality 0.20-0.35 (rounds 4, 9, 13)
+    HIGH: vitality >= 0.35 (rounds 1, 2, 5, 6, 7, 11, 12, 14)
     """
     if vitality < 0.08:
         return "DEAD"
@@ -955,9 +739,9 @@ def apply_cross_seed(observers, cross_table, calibration_table):
                     cross_dist = np.array(cross_table[key]["distribution"])
                     cross_n = cross_table[key]["sample_count"]
                     hist_prior = obs._prior_cache[y, x]
-                    # Aggressiv cross-seed: dette ER round-spesifikk data
-                    # 10 obs = 25%, 30 obs = 60%, 50+ obs = 80%
-                    cross_weight = min(0.80, cross_n / 50.0)
+                    # Moderat cross-seed: round-spesifikk data, men begrenset
+                    # for å unngå overfitting til støy fra få observasjoner
+                    cross_weight = min(0.50, cross_n / 80.0)
                     blended = (1 - cross_weight) * hist_prior + cross_weight * cross_dist
                     # BUG 3 FIX: Klasse-spesifikk floor (ikke uniform)
                     np.maximum(blended, obs._floor_cache[y, x], out=blended)
@@ -1001,6 +785,246 @@ def classify_world_type(seeds_data, vitality):
 def adjust_priors_for_vitality(observers, vitality):
     """DEPRECATED — blending.py handles this via get_blended_prior()."""
     pass  # Replaced by continuous blending in v6
+
+
+# === SOFT REGIME INFERENCE (v8) ===
+
+def compute_type_weights(survival_rate):
+    """Map survival rate to soft weights over DEAD/STABLE/BOOM world types.
+
+    Replaces hard classification with smooth transitions at bin boundaries.
+    Calibrated from 14 rounds ground truth:
+    - DEAD:    survival < 0.10 (R3, R8, R10)
+    - STABLE:  survival 0.10-0.33 (R4, R9, R13)
+    - BOOM:    survival > 0.33 (R1, R2, R5, R6, R7, R11, R12, R14)
+
+    Transition zones: ±0.05 around each boundary.
+    """
+    s = max(0.0, min(1.0, survival_rate))
+
+    # DEAD: full weight below 0.05, fades to 0 at 0.15
+    w_dead = max(0.0, min(1.0, (0.15 - s) / 0.10)) if s < 0.15 else 0.0
+    # BOOM: 0 below 0.28, full weight above 0.38
+    w_boom = max(0.0, min(1.0, (s - 0.28) / 0.10)) if s > 0.28 else 0.0
+    # STABLE: fills the remainder
+    w_stable = max(0.0, 1.0 - w_dead - w_boom)
+
+    total = w_dead + w_stable + w_boom
+    if total < 1e-10:
+        return {"DEAD": 0.0, "STABLE": 1.0, "BOOM": 0.0}
+
+    return {
+        "DEAD": w_dead / total,
+        "STABLE": w_stable / total,
+        "BOOM": w_boom / total,
+    }
+
+
+def compute_round_fingerprint(probe_observers):
+    """Extract multi-signal round fingerprint from probe observations.
+
+    Aggregates statistics across all probed seeds for robust regime inference.
+    More signals = less chance of misclassification from noisy single metric.
+
+    Returns dict with:
+    - survival_rate: fraction of initial settlements still alive (settlement+port)
+    - port_rate: ports among survived settlements
+    - ruin_rate: fraction of settlement positions now ruins
+    - forest_rate: forest encroachment around settlement positions
+    - empty_rate: fraction of settlement positions now empty
+    - n_observed: total settlements observed (confidence metric)
+    """
+    total_settlements = 0
+    survived = 0.0
+    ports = 0.0
+    ruins = 0.0
+    empties = 0.0
+    forest_neighbors = 0
+    total_neighbors = 0
+
+    for obs in probe_observers:
+        for s in obs.settlements:
+            sx, sy = s.get("x", -1), s.get("y", -1)
+            if not (0 <= sx < 40 and 0 <= sy < 40):
+                continue
+            if obs.observed[sy, sx] == 0:
+                continue
+
+            total_settlements += 1
+            n = obs.observed[sy, sx]
+            cls_frac = obs.counts[sy, sx] / n
+
+            survived += cls_frac[1] + cls_frac[2]  # settlement + port = alive
+            ports += cls_frac[2]
+            ruins += cls_frac[3]
+            empties += cls_frac[0]
+
+            # Check neighbors for forest encroachment signal
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = sy + dy, sx + dx
+                    if 0 <= ny < 40 and 0 <= nx < 40 and obs.observed[ny, nx] > 0:
+                        total_neighbors += 1
+                        forest_neighbors += obs.counts[ny, nx, 4] / obs.observed[ny, nx]
+
+    if total_settlements == 0:
+        return {
+            "survival_rate": 0.30,  # default conservative estimate
+            "port_rate": 0.1,
+            "ruin_rate": 0.1,
+            "forest_rate": 0.2,
+            "empty_rate": 0.4,
+            "n_observed": 0,
+        }
+
+    return {
+        "survival_rate": survived / total_settlements,
+        "port_rate": ports / max(survived, 0.01),
+        "ruin_rate": ruins / total_settlements,
+        "forest_rate": forest_neighbors / max(total_neighbors, 1),
+        "empty_rate": empties / total_settlements,
+        "n_observed": total_settlements,
+    }
+
+
+def fingerprint_to_vitality(fp):
+    """Convert multi-signal fingerprint to vitality estimate.
+
+    Primary signal: survival_rate (most predictive, maps ~linearly to vitality).
+    Secondary signals: ruin_rate and empty_rate refine estimate when enough data.
+    """
+    vitality = fp["survival_rate"]
+
+    # Small secondary adjustments when we have enough observed settlements
+    if fp["n_observed"] >= 3:
+        # More ruins than average → world is slightly more destructive
+        vitality -= (fp["ruin_rate"] - 0.12) * 0.08
+        # More empty than average → also more destructive
+        vitality -= (fp["empty_rate"] - 0.40) * 0.05
+
+    return max(0.0, min(1.0, vitality))
+
+
+def build_blended_prediction(grid, settlements, transition_table, simple_prior,
+                              opt_tables, type_weights):
+    """Build prior-only prediction with soft world-type blending.
+
+    Creates a SeedObserver for each world type with significant weight,
+    builds their prior-only predictions, and blends them.
+
+    This avoids the cliff effect of hard type classification — a survival
+    rate near the STABLE/BOOM boundary gets contributions from both tables.
+    """
+    preds = []
+    weights = []
+    for wtype, w in type_weights.items():
+        if w < 0.01:
+            continue
+        obs = SeedObserver(grid, settlements, transition_table, simple_prior,
+                          alpha=DEFAULT_ALPHA, opt_tables=opt_tables, world_type=wtype)
+        pred = obs.build_prediction(apply_smoothing=False)
+        preds.append(pred)
+        weights.append(w)
+
+    if not preds:
+        return None
+
+    result = np.zeros_like(preds[0])
+    total_w = sum(weights)
+    for pred, w in zip(preds, weights):
+        result += (w / total_w) * pred
+
+    # Renormalize (float precision from weighted sum)
+    sums = result.sum(axis=2, keepdims=True)
+    result /= np.maximum(sums, 1e-10)
+
+    return result
+
+
+def recalibrate_pred(pred, fingerprint, static_mask):
+    """Global prior recalibration based on round fingerprint.
+
+    Applies multiplicative adjustments to class probabilities based on how
+    this round's fingerprint deviates from the "average" round. This provides
+    continuous fine-tuning within each world type, especially helping BOOM
+    rounds where survival can range from 0.35 to 0.60+.
+
+    Adjustments are clamped to ±15% to prevent overcorrection.
+    """
+    if fingerprint["n_observed"] < 3:
+        return pred  # not enough data for reliable adjustment
+
+    survival = fingerprint["survival_rate"]
+    ruin_rate = fingerprint["ruin_rate"]
+
+    # Expected values for a "typical" round (weighted avg across calibration data)
+    expected_survival = 0.33
+    expected_ruin = 0.12
+
+    survival_dev = survival - expected_survival
+    ruin_dev = ruin_rate - expected_ruin
+
+    # Adjustment strength — modest to avoid overcorrection
+    strength = 0.12
+
+    # Class order: [empty, settlement, port, ruin, forest, mountain]
+    adjustments = np.ones(NUM_CLASSES)
+    adjustments[0] -= survival_dev * strength        # less empty if more survived
+    adjustments[1] += survival_dev * strength        # more settlement if more survived
+    adjustments[2] += survival_dev * strength * 0.5  # ports correlate with survival
+    adjustments[3] -= survival_dev * strength        # less ruin if more survived
+    adjustments[4] -= survival_dev * strength * 0.3  # forest slightly less if thriving
+    # Extra ruin adjustment
+    adjustments[3] += ruin_dev * strength * 0.5
+    adjustments[1] -= ruin_dev * strength * 0.3
+
+    # Clamp: never more than ±15% relative change
+    adjustments = np.clip(adjustments, 0.85, 1.15)
+
+    result = pred.copy()
+    dynamic = ~static_mask
+    # Apply adjustments to all dynamic cells at once
+    result[dynamic] *= adjustments
+    # Floor
+    result[dynamic] = np.maximum(result[dynamic], PROB_FLOOR)
+    # Renormalize
+    sums = result.sum(axis=2, keepdims=True)
+    result /= np.maximum(sums, 1e-10)
+
+    return result
+
+
+def apply_cross_seed_to_pred(pred, grid, settlements, cross_table, static_mask,
+                              max_weight=0.15):
+    """Apply light cross-seed signal to a prediction.
+
+    Uses round-specific cross-seed observations (aggregated across seeds) to
+    make small adjustments. Much lighter than the old approach of replacing
+    up to 80% of the prior.
+    """
+    if not cross_table:
+        return pred
+
+    result = pred.copy()
+    grid_list = grid if isinstance(grid, list) else np.array(grid).tolist()
+    for y in range(MAP_H):
+        for x in range(MAP_W):
+            if static_mask[y, x]:
+                continue
+            terrain, band, coastal = cell_key(grid_list, y, x, settlements)
+            key = f"{terrain}_{band}_{int(coastal)}"
+            if key in cross_table:
+                cross_dist = np.array(cross_table[key]["distribution"])
+                cross_n = cross_table[key]["sample_count"]
+                # Scale by sample count: 30+ samples → full max_weight
+                w = max_weight * min(1.0, cross_n / 30.0)
+                result[y, x] = (1 - w) * result[y, x] + w * cross_dist
+                np.maximum(result[y, x], PROB_FLOOR, out=result[y, x])
+                result[y, x] /= result[y, x].sum()
+
+    return result
 
 
 # === QUERY PLANNER ===
@@ -1100,15 +1124,21 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
                 queries_per_seed=10, submit=True, alpha=DEFAULT_ALPHA,
                 type_tables=None, safety_submit=True, opt_tables=None):
     """
-    Optimal round-solving strategy v7.
+    Round-solving strategy v8 — soft regime inference.
 
     Faser:
-    1. SAFETY: Submit prior-only med optimerte tabeller (default type)
-    2. PROBE: Observer seed 0-1 (2 queries each), inferér 3-type (DEAD/STABLE/BOOM)
-    3. TYPE-AWARE: Rebuild alle observers med riktig world type
-    4. OBSERVE: Observer seed 0-4
-    5. CROSS-SEED: Kontinuerlig cross-seed learning
-    6. RESUBMIT: Alle seeds med observasjoner + riktig type
+    1. SAFETY: Soft-blended prior submit (balanced STABLE/BOOM default)
+    2. PROBE: Diagnostic queries across up to 4 seeds → round fingerprint
+    3. TYPE-AWARE: Rebuild observers with best-guess world type
+    4. OBSERVE: Distribute remaining queries across all seeds
+    5. CROSS-SEED: Continuous cross-seed learning
+    6. RESUBMIT: Soft-blended prediction + global recalibration + light cross-seed
+
+    Key improvements over v7:
+    - Soft blending between DEAD/STABLE/BOOM (no hard classification cliff)
+    - Multi-signal fingerprint (survival + ruin + empty + forest rates)
+    - Diagnostic probes spread across 4 seeds instead of 2
+    - Global recalibration instead of cell-level observation updates
     """
     seeds_data = round_data.get("seeds", round_data.get("initial_states", []))
     if not seeds_data:
@@ -1119,23 +1149,26 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
     n_settlements_s0 = len(seeds_data[0].get("settlements", []))
     print(f"\n{n_seeds} seeds, {n_settlements_s0} initial settlements (alpha={alpha:.1f})")
 
-    # === FASE 1: SAFETY SUBMIT med super-kalibrering (default vbin=MED) ===
+    # === FASE 1: SAFETY SUBMIT med soft-blended prior (balanced default) ===
     prior_scores = []
     if safety_submit and submit:
-        default_vbin = "MED"  # safe default — middle ground
-        print(f"\n  FASE 1: Super-calibration safety submit (vbin={default_vbin})...")
+        # Default: survival 0.33 = right at STABLE/BOOM boundary → balanced blend
+        default_weights = compute_type_weights(0.33)
+        dw_str = ", ".join(f"{k}:{v:.2f}" for k, v in default_weights.items() if v > 0.01)
+        print(f"\n  FASE 1: Soft-blended safety submit ({{{dw_str}}})...")
         for si in range(n_seeds):
             sd = seeds_data[si]
             grid = sd.get("grid", [])
             settlements = sd.get("settlements", [])
 
-            # Prøv super-calibration først
-            pred = super_predict(grid, settlements, default_vbin)
+            # Soft-blended prior across world types (no hard classification)
+            pred = build_blended_prediction(grid, settlements, transition_table, simple_prior,
+                                            opt_tables, default_weights)
             if pred is None:
-                # Fallback til gammel metode
+                # Fallback: single-type prediction
                 obs = SeedObserver(grid, settlements, transition_table, simple_prior,
                                  alpha=alpha, opt_tables=opt_tables, world_type="STABLE")
-                pred = obs.build_prediction(apply_smoothing=False, world_type="STABLE")
+                pred = obs.build_prediction(apply_smoothing=False)
 
             try:
                 resp = client.submit(round_id, si, pred.tolist())
@@ -1147,18 +1180,22 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
                 print(f"    Seed {si} prior submit FEIL: {e}")
                 prior_scores.append(None)
 
-    # === FASE 2: PROBE — Observer seed 0-1 for type detection ===
-    print("\n  FASE 2: Type detection (seed 0-1, 2 queries each)...")
+    # === FASE 2: PROBE — Diagnostic queries across multiple seeds ===
+    # Probing more seeds gives more settlement observations (hidden params are shared)
+    n_probe_seeds = min(4, n_seeds)
+    probe_queries_each = max(1, 4 // n_probe_seeds)  # ~4 total probe queries
+    total_probe_queries = n_probe_seeds * probe_queries_each
+    print(f"\n  FASE 2: Diagnostic probe ({n_probe_seeds} seeds × {probe_queries_each} query)...")
     probe_observers = []
-    for si in range(min(2, n_seeds)):
+    for si in range(n_probe_seeds):
         sd = seeds_data[si]
         grid = sd.get("grid", [])
         settlements = sd.get("settlements", [])
         obs = SeedObserver(grid, settlements, transition_table, simple_prior,
                          alpha=alpha, opt_tables=opt_tables, world_type="STABLE")
 
-        # 2 queries for probing — plassert over settlement-klynger
-        viewports = plan_queries(grid, settlements, n_queries=2)
+        # Target settlement-rich areas for maximum diagnostic value
+        viewports = plan_queries(grid, settlements, n_queries=probe_queries_each)
         for i, (vx, vy, vw, vh) in enumerate(viewports):
             try:
                 result = client.simulate(round_id, si, vx, vy, vw, vh)
@@ -1173,35 +1210,22 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
                 print(f"    Seed {si} probe FEIL: {e}")
         probe_observers.append(obs)
 
-    # Inferér vitality direkte fra survival rate (inkl. ports!)
-    total_init_s = 0
-    total_survived_s = 0.0
-    for obs in probe_observers:
-        for s in obs.settlements:
-            sx, sy = s.get("x", -1), s.get("y", -1)
-            if not (0 <= sx < 40 and 0 <= sy < 40):
-                continue
-            if obs.observed[sy, sx] > 0:
-                total_init_s += 1
-                # Count settlement (class 1) + port (class 2) as survived
-                n = obs.observed[sy, sx]
-                total_survived_s += (obs.counts[sy, sx, 1] + obs.counts[sy, sx, 2]) / n
+    # Multi-signal fingerprint from all probed seeds
+    fingerprint = compute_round_fingerprint(probe_observers)
+    vitality = fingerprint_to_vitality(fingerprint)
+    type_weights = compute_type_weights(vitality)
 
-    if total_init_s > 0:
-        raw_survival = total_survived_s / total_init_s
-    else:
-        raw_survival = 0.35  # no data → default MED
-
-    # Direct mapping to super-calibration vbin
-    vbin = vitality_to_vbin(raw_survival)
-
-    # Also keep old vitality for backwards compatibility
-    vitality = raw_survival
+    # Hard classification for backward compatibility (SeedObserver world_type)
     world_type, n_sett = classify_world_type(seeds_data, vitality)
     opt_wtype = world_type
     if opt_wtype in ("BOOM_CONC", "BOOM_SPREAD"):
         opt_wtype = "BOOM"
-    print(f"\n  Survival: {raw_survival:.3f} → vbin={vbin}, type={world_type} ({total_init_s} settlements observed)")
+
+    tw_str = ", ".join(f"{k}:{v:.2f}" for k, v in type_weights.items() if v > 0.01)
+    print(f"\n  Fingerprint: survival={fingerprint['survival_rate']:.3f}, "
+          f"ruin={fingerprint['ruin_rate']:.2f}, empty={fingerprint['empty_rate']:.2f} "
+          f"({fingerprint['n_observed']} settlements observed)")
+    print(f"  → vitality={vitality:.3f}, weights={{{tw_str}}}, hard_type={world_type}")
 
     # === FASE 3: TYPE-AWARE OBSERVERS ===
     # Velg type-spesifikk tabell for blending
@@ -1222,7 +1246,7 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
 
     # Bestem queries per seed — bruk ALLE queries
     total_budget = queries_per_seed * n_seeds
-    queries_used = 4  # probe queries brukt
+    queries_used = total_probe_queries  # probe queries brukt
     queries_left = total_budget - queries_used
 
     print(f"  Query-plan: {queries_left} queries fordelt på {n_seeds} seeds")
@@ -1234,13 +1258,13 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
         settlements = sd.get("settlements", [])
 
         if si < len(probe_observers):
-            # Seed 0-1: gjenbruk observer, rebuild priors med riktig world type
+            # Probed seed: gjenbruk observer, rebuild priors med riktig world type
             obs = probe_observers[si]
             obs.opt_tables = opt_tables
             obs.world_type = opt_wtype
             obs._rebuild_priors()  # Rebuild med riktig type
         else:
-            # Seed 2-4: ny observer med opt_tables + korrekt world type
+            # Unprobed seed: ny observer med opt_tables + korrekt world type
             obs = SeedObserver(grid, settlements, transition_table, simple_prior,
                              alpha=alpha, opt_tables=opt_tables, world_type=opt_wtype)
 
@@ -1248,8 +1272,8 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
         seeds_remaining = n_seeds - si
         for_this_seed = queries_left // seeds_remaining
         if si < len(probe_observers):
-            for_this_seed -= 2  # allerede brukt 2 på probe
-        queries_left -= (for_this_seed + (2 if si < len(probe_observers) else 0))
+            for_this_seed -= probe_queries_each  # allerede brukt probe queries
+        queries_left -= (for_this_seed + (probe_queries_each if si < len(probe_observers) else 0))
 
         print(f"\n  Seed {si}: {len(settlements)} settlements, {for_this_seed} queries")
 
@@ -1286,28 +1310,13 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
                 if si == n_seeds - 1:  # Bare print på siste
                     print(f"\n  Cross-seed: {n_keys} kategorier, {total_obs_count} obs")
 
-    # === FASE 6: RESUBMIT med kernel-prediksjon (vitality + urban) ===
-    vbin = vitality_to_vbin(vitality)
+    # === FASE 6: RESUBMIT med soft-blended priors + global recalibration ===
+    tw_str = ", ".join(f"{k}:{v:.2f}" for k, v in type_weights.items() if v > 0.01)
+    print(f"\n  FASE 6: Soft-blended resubmit (vitality={vitality:.3f}, {{{tw_str}}})...")
 
-    # Estimér urban fra observasjonene vi allerede har
-    urban_est = None
-    for obs in observers:
-        if obs.observed.sum() > 0:
-            # Bygg observasjons-grid: settlement-sannsynlighet per celle
-            obs_grid = np.zeros((40, 40, 6))
-            for y in range(40):
-                for x in range(40):
-                    n = obs.observed[y, x]
-                    if n > 0:
-                        obs_grid[y, x] = obs.counts[y, x] / n
-            sd0 = seeds_data[0]
-            urban_est = estimate_urban(sd0.get("grid", []), sd0.get("settlements", []), obs_grid)
-            break
+    # Build cross-seed table for light final adjustment
+    final_cross_table = build_cross_seed_prior(observers) if len(observers) >= 2 else {}
 
-    if urban_est is None:
-        urban_est = 1.0  # default: mid-range
-
-    print(f"\n  FASE 6: Kernel resubmit (vbin={vbin}, vitality={vitality:.3f}, urban={urban_est:.1f})...")
     results = []
     for si, obs in enumerate(observers):
         dm = ~obs.static_mask
@@ -1315,20 +1324,28 @@ def solve_round(client, round_id, round_data, transition_table, simple_prior,
         dt = dm.sum()
         mo = obs.observed[dm].mean() if dt > 0 else 0
 
-        # Bygg kernel-prediksjon med vitality + urban
         sd = seeds_data[si]
         grid = sd.get("grid", [])
         settlements = sd.get("settlements", [])
-        super_pred = super_predict(grid, settlements, vbin, vitality=vitality, urban=urban_est)
 
-        if super_pred is not None:
-            # Bruk ren super-prior — obs-blend injiserer støy med <2 obs/celle
-            final_pred = super_pred
-            reason = f"kernel (vbin={vbin}, urban={urban_est:.1f})"
+        # Step 1: Soft-blended prior prediction (no hard type cliff)
+        blended_pred = build_blended_prediction(
+            grid, settlements, transition_table, simple_prior,
+            opt_tables, type_weights)
+
+        if blended_pred is not None:
+            # Step 2: Global recalibration based on round fingerprint
+            final_pred = recalibrate_pred(blended_pred, fingerprint, obs.static_mask)
+            # Step 3: Light cross-seed adjustment (15% max, not 80%)
+            if final_cross_table and do > 0:
+                final_pred = apply_cross_seed_to_pred(
+                    final_pred, grid, settlements, final_cross_table,
+                    obs.static_mask, max_weight=0.15)
+            reason = f"soft-blend+recal (v={vitality:.2f})"
         else:
-            # Fallback til gammel metode
+            # Fallback: hard-typed prediction from observer
             final_pred = obs.build_prediction(apply_smoothing=False, world_type=opt_wtype)
-            reason = "legacy fallback"
+            reason = "hard-typed fallback"
 
         print(f"  Seed {si}: {do}/{dt} obs, snitt {mo:.1f}/celle → {reason}")
 

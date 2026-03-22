@@ -1,0 +1,2660 @@
+{
+  "generated_at": "2026-03-21T20:59:02",
+  "alpha": 6.0,
+  "replay_round_numbers": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    8
+  ],
+  "scoring_validation": {
+    "rounds": [
+      {
+        "round_number": 9,
+        "mean_abs_diff": 2.7166323081928568e-05,
+        "max_abs_diff": 4.598719187853817e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 11,
+        "mean_abs_diff": 3.7450816496686914e-05,
+        "max_abs_diff": 4.953572643273674e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 1,
+        "mean_abs_diff": 3.346613336674409e-05,
+        "max_abs_diff": 4.741335344959907e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 10,
+        "mean_abs_diff": 1.102746067545013e-05,
+        "max_abs_diff": 3.099436506204256e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 2,
+        "mean_abs_diff": 2.9506576376547854e-05,
+        "max_abs_diff": 4.616318399541797e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 12,
+        "mean_abs_diff": 1.4719248579808663e-05,
+        "max_abs_diff": 2.493187516705575e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 13,
+        "mean_abs_diff": 3.02984211558055e-05,
+        "max_abs_diff": 4.129381083828321e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 4,
+        "mean_abs_diff": 2.0647969090248353e-05,
+        "max_abs_diff": 3.7634142422859895e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 6,
+        "mean_abs_diff": 1.650956821208638e-05,
+        "max_abs_diff": 3.5510814623052056e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 8,
+        "mean_abs_diff": 1.9473066613073796e-05,
+        "max_abs_diff": 4.8460964276131335e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 14,
+        "mean_abs_diff": 3.392457208377664e-05,
+        "max_abs_diff": 4.9819502216053024e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 3,
+        "mean_abs_diff": 3.278635897743243e-05,
+        "max_abs_diff": 7.440808662906306e-05,
+        "num_seeds": 5
+      },
+      {
+        "round_number": 5,
+        "mean_abs_diff": 3.867607962177999e-05,
+        "max_abs_diff": 5.305291580981475e-05,
+        "num_seeds": 5
+      }
+    ],
+    "global_mean_abs_diff": 2.6588661102413024e-05,
+    "global_max_abs_diff": 7.440808662906306e-05,
+    "num_seed_scores_checked": 65
+  },
+  "current_defaults": {
+    "multiplier": 7.3,
+    "base_scale": 0.3,
+    "max_adjustment": 0.12
+  },
+  "baselines": {
+    "multiplier_0_0": {
+      "multiplier": 0.0,
+      "num_rounds": 6,
+      "weighted_total_score": 659.2337,
+      "weighted_average_score": 87.09051,
+      "mean_round_score": 87.13145,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 88.11,
+          "weighted_round_score": 97.1413,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.1416,
+          "weighted_round_score": 100.8773,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 83.9104,
+          "weighted_round_score": 107.0948,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 90.3054,
+          "weighted_round_score": 133.4262,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    "multiplier_1_0": {
+      "multiplier": 1.0,
+      "num_rounds": 6,
+      "weighted_total_score": 660.1881,
+      "weighted_average_score": 87.216583,
+      "mean_round_score": 87.239417,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.7956,
+          "weighted_round_score": 96.7947,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.1941,
+          "weighted_round_score": 100.938,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 84.4269,
+          "weighted_round_score": 107.7541,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 90.6986,
+          "weighted_round_score": 134.0072,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    }
+  },
+  "coarse_results": [
+    {
+      "multiplier": 7.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7309,
+      "weighted_average_score": 87.552492,
+      "mean_round_score": 87.451717,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.9413,
+          "weighted_round_score": 93.6478,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5144,
+          "weighted_round_score": 101.3089,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9541,
+          "weighted_round_score": 109.7033,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9792,
+          "weighted_round_score": 137.3768,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7286,
+      "weighted_average_score": 87.55222,
+      "mean_round_score": 87.460933,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.1983,
+          "weighted_round_score": 93.9311,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4911,
+          "weighted_round_score": 101.2819,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9285,
+          "weighted_round_score": 109.6705,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8264,
+          "weighted_round_score": 137.151,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7052,
+      "weighted_average_score": 87.54914,
+      "mean_round_score": 87.43895,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.6802,
+          "weighted_round_score": 93.3599,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5374,
+          "weighted_round_score": 101.3355,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9678,
+          "weighted_round_score": 109.7206,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.127,
+          "weighted_round_score": 137.5951,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6982,
+      "weighted_average_score": 87.54819,
+      "mean_round_score": 87.46645,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.4506,
+          "weighted_round_score": 94.2093,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4676,
+          "weighted_round_score": 101.2547,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.8903,
+          "weighted_round_score": 109.6217,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.6689,
+          "weighted_round_score": 136.9184,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6387,
+      "weighted_average_score": 87.540351,
+      "mean_round_score": 87.4682,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.698,
+          "weighted_round_score": 94.482,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4439,
+          "weighted_round_score": 101.2272,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.8389,
+          "weighted_round_score": 109.5562,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.5071,
+          "weighted_round_score": 136.6792,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 5.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.5489,
+      "weighted_average_score": 87.52846,
+      "mean_round_score": 87.465917,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.9395,
+          "weighted_round_score": 94.7484,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4199,
+          "weighted_round_score": 101.1994,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.7737,
+          "weighted_round_score": 109.473,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.3411,
+          "weighted_round_score": 136.434,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 5.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.4278,
+      "weighted_average_score": 87.512477,
+      "mean_round_score": 87.45955,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 86.1749,
+          "weighted_round_score": 95.0078,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.3957,
+          "weighted_round_score": 101.1714,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.6942,
+          "weighted_round_score": 109.3715,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.1712,
+          "weighted_round_score": 136.183,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 4.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.2728,
+      "weighted_average_score": 87.491974,
+      "mean_round_score": 87.44865,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 86.4035,
+          "weighted_round_score": 95.2599,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.3712,
+          "weighted_round_score": 101.1431,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.5982,
+          "weighted_round_score": 109.249,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 91.9977,
+          "weighted_round_score": 135.9267,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 4.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.0827,
+      "weighted_average_score": 87.466862,
+      "mean_round_score": 87.433133,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 86.6256,
+          "weighted_round_score": 95.5048,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.3465,
+          "weighted_round_score": 101.1145,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.4846,
+          "weighted_round_score": 109.104,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 91.8208,
+          "weighted_round_score": 135.6653,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 3.5,
+      "num_rounds": 6,
+      "weighted_total_score": 661.8587,
+      "weighted_average_score": 87.437289,
+      "mean_round_score": 87.413133,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 86.8408,
+          "weighted_round_score": 95.742,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.3217,
+          "weighted_round_score": 101.0857,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.3543,
+          "weighted_round_score": 108.9377,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 91.6407,
+          "weighted_round_score": 135.3992,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 3.0,
+      "num_rounds": 6,
+      "weighted_total_score": 661.5999,
+      "weighted_average_score": 87.403105,
+      "mean_round_score": 87.388483,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.0487,
+          "weighted_round_score": 95.9712,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.2966,
+          "weighted_round_score": 101.0567,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.2067,
+          "weighted_round_score": 108.7493,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 91.4576,
+          "weighted_round_score": 135.1286,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 2.5,
+      "num_rounds": 6,
+      "weighted_total_score": 661.3049,
+      "weighted_average_score": 87.364111,
+      "mean_round_score": 87.358967,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.2486,
+          "weighted_round_score": 96.1916,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.2712,
+          "weighted_round_score": 101.0274,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.041,
+          "weighted_round_score": 108.5379,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 91.2717,
+          "weighted_round_score": 134.8539,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 2.0,
+      "num_rounds": 6,
+      "weighted_total_score": 660.9723,
+      "weighted_average_score": 87.320196,
+      "mean_round_score": 87.324467,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.4402,
+          "weighted_round_score": 96.4028,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.2457,
+          "weighted_round_score": 100.9978,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 84.8565,
+          "weighted_round_score": 108.3023,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 91.0831,
+          "weighted_round_score": 134.5753,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 1.5,
+      "num_rounds": 6,
+      "weighted_total_score": 660.6005,
+      "weighted_average_score": 87.271082,
+      "mean_round_score": 87.284683,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.6227,
+          "weighted_round_score": 96.604,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.22,
+          "weighted_round_score": 100.968,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 84.6521,
+          "weighted_round_score": 108.0414,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 90.892,
+          "weighted_round_score": 134.293,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 1.0,
+      "num_rounds": 6,
+      "weighted_total_score": 660.1881,
+      "weighted_average_score": 87.216583,
+      "mean_round_score": 87.239417,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.7956,
+          "weighted_round_score": 96.7947,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.1941,
+          "weighted_round_score": 100.938,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 84.4269,
+          "weighted_round_score": 107.7541,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 90.6986,
+          "weighted_round_score": 134.0072,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 0.5,
+      "num_rounds": 6,
+      "weighted_total_score": 659.7331,
+      "weighted_average_score": 87.156481,
+      "mean_round_score": 87.188433,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 87.9583,
+          "weighted_round_score": 96.974,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.1679,
+          "weighted_round_score": 100.9078,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 84.1801,
+          "weighted_round_score": 107.439,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 90.503,
+          "weighted_round_score": 133.7182,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 0.0,
+      "num_rounds": 6,
+      "weighted_total_score": 659.2337,
+      "weighted_average_score": 87.09051,
+      "mean_round_score": 87.13145,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 88.11,
+          "weighted_round_score": 97.1413,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.1416,
+          "weighted_round_score": 100.8773,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 83.9104,
+          "weighted_round_score": 107.0948,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 90.3054,
+          "weighted_round_score": 133.4262,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    }
+  ],
+  "fine_results": [
+    {
+      "multiplier": 7.3,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7333,
+      "weighted_average_score": 87.55284,
+      "mean_round_score": 87.45585,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.0446,
+          "weighted_round_score": 93.7617,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5051,
+          "weighted_round_score": 101.2981,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9454,
+          "weighted_round_score": 109.6921,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9187,
+          "weighted_round_score": 137.2873,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.2,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7329,
+      "weighted_average_score": 87.552773,
+      "mean_round_score": 87.457683,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.096,
+          "weighted_round_score": 93.8184,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5005,
+          "weighted_round_score": 101.2927,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9402,
+          "weighted_round_score": 109.6855,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8881,
+          "weighted_round_score": 137.2422,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.4,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7327,
+      "weighted_average_score": 87.552748,
+      "mean_round_score": 87.453867,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.9931,
+          "weighted_round_score": 93.7049,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5098,
+          "weighted_round_score": 101.3035,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.95,
+          "weighted_round_score": 109.698,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.949,
+          "weighted_round_score": 137.3322,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.1,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7312,
+      "weighted_average_score": 87.552575,
+      "mean_round_score": 87.459383,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.1472,
+          "weighted_round_score": 93.8748,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4958,
+          "weighted_round_score": 101.2873,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9346,
+          "weighted_round_score": 109.6783,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8574,
+          "weighted_round_score": 137.1967,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7309,
+      "weighted_average_score": 87.552492,
+      "mean_round_score": 87.451717,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.9413,
+          "weighted_round_score": 93.6478,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5144,
+          "weighted_round_score": 101.3089,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9541,
+          "weighted_round_score": 109.7033,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9792,
+          "weighted_round_score": 137.3768,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7286,
+      "weighted_average_score": 87.55222,
+      "mean_round_score": 87.460933,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.1983,
+          "weighted_round_score": 93.9311,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4911,
+          "weighted_round_score": 101.2819,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9285,
+          "weighted_round_score": 109.6705,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8264,
+          "weighted_round_score": 137.151,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.6,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7278,
+      "weighted_average_score": 87.552116,
+      "mean_round_score": 87.44945,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.8894,
+          "weighted_round_score": 93.5906,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.519,
+          "weighted_round_score": 101.3142,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9578,
+          "weighted_round_score": 109.7079,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.0092,
+          "weighted_round_score": 137.421,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.9,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7249,
+      "weighted_average_score": 87.551717,
+      "mean_round_score": 87.462333,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.2491,
+          "weighted_round_score": 93.9872,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4864,
+          "weighted_round_score": 101.2765,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9219,
+          "weighted_round_score": 109.6621,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.7953,
+          "weighted_round_score": 137.105,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.7,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7239,
+      "weighted_average_score": 87.551583,
+      "mean_round_score": 87.447033,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.8374,
+          "weighted_round_score": 93.5332,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5236,
+          "weighted_round_score": 101.3196,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.961,
+          "weighted_round_score": 109.712,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.0389,
+          "weighted_round_score": 137.465,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.8,
+      "num_rounds": 6,
+      "weighted_total_score": 662.72,
+      "weighted_average_score": 87.551074,
+      "mean_round_score": 87.4636,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.2998,
+          "weighted_round_score": 94.043,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4818,
+          "weighted_round_score": 101.2711,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9147,
+          "weighted_round_score": 109.653,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.764,
+          "weighted_round_score": 137.0588,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.8,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7188,
+      "weighted_average_score": 87.550902,
+      "mean_round_score": 87.444467,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.7851,
+          "weighted_round_score": 93.4756,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5282,
+          "weighted_round_score": 101.3249,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9637,
+          "weighted_round_score": 109.7155,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.0685,
+          "weighted_round_score": 137.5087,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.7,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7138,
+      "weighted_average_score": 87.550281,
+      "mean_round_score": 87.464717,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.3503,
+          "weighted_round_score": 94.0987,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4771,
+          "weighted_round_score": 101.2656,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9071,
+          "weighted_round_score": 109.6432,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.7325,
+          "weighted_round_score": 137.0122,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.9,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7127,
+      "weighted_average_score": 87.550094,
+      "mean_round_score": 87.441783,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.7328,
+          "weighted_round_score": 93.4179,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5328,
+          "weighted_round_score": 101.3302,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.966,
+          "weighted_round_score": 109.7184,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.0978,
+          "weighted_round_score": 137.5521,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.6,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7066,
+      "weighted_average_score": 87.549303,
+      "mean_round_score": 87.46565,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.4006,
+          "weighted_round_score": 94.1541,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4723,
+          "weighted_round_score": 101.2602,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.8989,
+          "weighted_round_score": 109.6328,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.7008,
+          "weighted_round_score": 136.9654,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.0,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7052,
+      "weighted_average_score": 87.54914,
+      "mean_round_score": 87.43895,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.6802,
+          "weighted_round_score": 93.3599,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5374,
+          "weighted_round_score": 101.3355,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9678,
+          "weighted_round_score": 109.7206,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.127,
+          "weighted_round_score": 137.5951,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 6.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6982,
+      "weighted_average_score": 87.54819,
+      "mean_round_score": 87.46645,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.4506,
+          "weighted_round_score": 94.2093,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4676,
+          "weighted_round_score": 101.2547,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.8903,
+          "weighted_round_score": 109.6217,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.6689,
+          "weighted_round_score": 136.9184,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.1,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6969,
+      "weighted_average_score": 87.548028,
+      "mean_round_score": 87.435967,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.6275,
+          "weighted_round_score": 93.3018,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.542,
+          "weighted_round_score": 101.3408,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9691,
+          "weighted_round_score": 109.7223,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.1559,
+          "weighted_round_score": 137.6379,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.2,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6876,
+      "weighted_average_score": 87.546795,
+      "mean_round_score": 87.432867,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.5747,
+          "weighted_round_score": 93.2436,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5466,
+          "weighted_round_score": 101.3461,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.97,
+          "weighted_round_score": 109.7235,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.1846,
+          "weighted_round_score": 137.6803,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.3,
+      "num_rounds": 6,
+      "weighted_total_score": 662.677,
+      "weighted_average_score": 87.545379,
+      "mean_round_score": 87.429583,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.5216,
+          "weighted_round_score": 93.1851,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5511,
+          "weighted_round_score": 101.3514,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9704,
+          "weighted_round_score": 109.724,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.2131,
+          "weighted_round_score": 137.7224,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.4,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6652,
+      "weighted_average_score": 87.543856,
+      "mean_round_score": 87.4262,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.4685,
+          "weighted_round_score": 93.1265,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5557,
+          "weighted_round_score": 101.3566,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9703,
+          "weighted_round_score": 109.7239,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.2414,
+          "weighted_round_score": 137.7641,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 8.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.6526,
+      "weighted_average_score": 87.542179,
+      "mean_round_score": 87.422667,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.4152,
+          "weighted_round_score": 93.0677,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5602,
+          "weighted_round_score": 101.3619,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9699,
+          "weighted_round_score": 109.7233,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 93.2694,
+          "weighted_round_score": 137.8056,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    }
+  ],
+  "final_results": [
+    {
+      "multiplier": 7.25,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7333,
+      "weighted_average_score": 87.552821,
+      "mean_round_score": 87.456783,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.0704,
+          "weighted_round_score": 93.7901,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5028,
+          "weighted_round_score": 101.2954,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9428,
+          "weighted_round_score": 109.6889,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9034,
+          "weighted_round_score": 137.2648,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.3,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7333,
+      "weighted_average_score": 87.55284,
+      "mean_round_score": 87.45585,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.0446,
+          "weighted_round_score": 93.7617,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5051,
+          "weighted_round_score": 101.2981,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9454,
+          "weighted_round_score": 109.6921,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9187,
+          "weighted_round_score": 137.2873,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.35,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7331,
+      "weighted_average_score": 87.552803,
+      "mean_round_score": 87.454867,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.0189,
+          "weighted_round_score": 93.7333,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5074,
+          "weighted_round_score": 101.3008,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9477,
+          "weighted_round_score": 109.6951,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9339,
+          "weighted_round_score": 137.3098,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.2,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7329,
+      "weighted_average_score": 87.552773,
+      "mean_round_score": 87.457683,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.096,
+          "weighted_round_score": 93.8184,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5005,
+          "weighted_round_score": 101.2927,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9402,
+          "weighted_round_score": 109.6855,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8881,
+          "weighted_round_score": 137.2422,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.4,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7327,
+      "weighted_average_score": 87.552748,
+      "mean_round_score": 87.453867,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.9931,
+          "weighted_round_score": 93.7049,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5098,
+          "weighted_round_score": 101.3035,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.95,
+          "weighted_round_score": 109.698,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.949,
+          "weighted_round_score": 137.3322,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.15,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7322,
+      "weighted_average_score": 87.552708,
+      "mean_round_score": 87.458567,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.1217,
+          "weighted_round_score": 93.8466,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4981,
+          "weighted_round_score": 101.29,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9375,
+          "weighted_round_score": 109.682,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8728,
+          "weighted_round_score": 137.2195,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.45,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7319,
+      "weighted_average_score": 87.552628,
+      "mean_round_score": 87.4528,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.9672,
+          "weighted_round_score": 93.6764,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5121,
+          "weighted_round_score": 101.3062,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9521,
+          "weighted_round_score": 109.7007,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9641,
+          "weighted_round_score": 137.3545,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.1,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7312,
+      "weighted_average_score": 87.552575,
+      "mean_round_score": 87.459383,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 85.1472,
+          "weighted_round_score": 93.8748,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.4958,
+          "weighted_round_score": 101.2873,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9346,
+          "weighted_round_score": 109.6783,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.8574,
+          "weighted_round_score": 137.1967,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    },
+    {
+      "multiplier": 7.5,
+      "num_rounds": 6,
+      "weighted_total_score": 662.7309,
+      "weighted_average_score": 87.552492,
+      "mean_round_score": 87.451717,
+      "rounds": [
+        {
+          "round_number": 2,
+          "round_score": 84.9413,
+          "weighted_round_score": 93.6478,
+          "world_type": "BOOM_CONC",
+          "spatial_coherence": 0.665612
+        },
+        {
+          "round_number": 3,
+          "round_score": 87.5144,
+          "weighted_round_score": 101.3089,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.397333
+        },
+        {
+          "round_number": 4,
+          "round_score": 92.887,
+          "weighted_round_score": 112.9042,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.455714
+        },
+        {
+          "round_number": 5,
+          "round_score": 85.9541,
+          "weighted_round_score": 109.7033,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.7
+        },
+        {
+          "round_number": 6,
+          "round_score": 80.4343,
+          "weighted_round_score": 107.7899,
+          "world_type": "STABLE",
+          "spatial_coherence": 0.483361
+        },
+        {
+          "round_number": 8,
+          "round_score": 92.9792,
+          "weighted_round_score": 137.3768,
+          "world_type": "DEAD",
+          "spatial_coherence": 0.219048
+        }
+      ]
+    }
+  ],
+  "best": {
+    "multiplier": 7.25,
+    "num_rounds": 6,
+    "weighted_total_score": 662.7333,
+    "weighted_average_score": 87.552821,
+    "mean_round_score": 87.456783,
+    "rounds": [
+      {
+        "round_number": 2,
+        "round_score": 85.0704,
+        "weighted_round_score": 93.7901,
+        "world_type": "BOOM_CONC",
+        "spatial_coherence": 0.665612
+      },
+      {
+        "round_number": 3,
+        "round_score": 87.5028,
+        "weighted_round_score": 101.2954,
+        "world_type": "DEAD",
+        "spatial_coherence": 0.397333
+      },
+      {
+        "round_number": 4,
+        "round_score": 92.887,
+        "weighted_round_score": 112.9042,
+        "world_type": "DEAD",
+        "spatial_coherence": 0.455714
+      },
+      {
+        "round_number": 5,
+        "round_score": 85.9428,
+        "weighted_round_score": 109.6889,
+        "world_type": "STABLE",
+        "spatial_coherence": 0.7
+      },
+      {
+        "round_number": 6,
+        "round_score": 80.4343,
+        "weighted_round_score": 107.7899,
+        "world_type": "STABLE",
+        "spatial_coherence": 0.483361
+      },
+      {
+        "round_number": 8,
+        "round_score": 92.9034,
+        "weighted_round_score": 137.2648,
+        "world_type": "DEAD",
+        "spatial_coherence": 0.219048
+      }
+    ]
+  }
+}
