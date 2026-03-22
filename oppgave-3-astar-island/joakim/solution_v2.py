@@ -64,8 +64,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 OLA_DIR = Path(__file__).parent.parent / "ola"
 HISTORY_ROOT = PROJECT_ROOT / "history"
 
-CALIBRATION_OPT_FILE = PROJECT_ROOT / "calibration_manhattan_opt.json"
-MODEL_TABLES_FILE = PROJECT_ROOT / "model_tables_17r.json"
+CALIBRATION_OPT_FILE = PROJECT_ROOT / "calibration_manhattan_opt_22r.json"
+MODEL_TABLES_FILE = PROJECT_ROOT / "model_tables_22r.json"
 MODEL_TABLES_FILE_OLA = OLA_DIR / "model_tables.json"
 
 
@@ -399,8 +399,8 @@ class RoundModel:
 
     def compute_type_weights(self):
         s = self.get_vitality()
-        w_dead = max(0.0, min(1.0, (0.20 - s) / 0.12)) if s < 0.20 else 0.0
-        w_boom = max(0.0, min(1.0, (s - 0.25) / 0.05)) if s > 0.25 else 0.0
+        w_dead = max(0.0, min(1.0, (0.20 - s) / 0.16)) if s < 0.20 else 0.0
+        w_boom = max(0.0, min(1.0, (s - 0.25) / 0.03)) if s > 0.25 else 0.0
         w_stable = max(0.0, 1.0 - w_dead - w_boom)
         total = w_dead + w_stable + w_boom
         if total < 1e-10:
@@ -456,8 +456,8 @@ class RoundModel:
 
                 if emp_n >= 5:
                     emp = self.key_counts[fkey] / emp_n
-                    # Scale weight with sample count: 5→5%, 50→50%
-                    emp_weight = min(0.50, emp_n / 100.0)
+                    # Scale weight with sample count: 5→3.3%, 90→60%
+                    emp_weight = min(0.60, emp_n / 150.0)
                     base = emp_weight * emp + (1.0 - emp_weight) * cal
                 else:
                     base = cal
@@ -468,7 +468,7 @@ class RoundModel:
                 ck = (si, y, x)
                 cell_n = self.cell_total.get(ck, 0)
                 if cell_n > 0:
-                    alpha = 50.0  # 1 obs → 2% cell, 98% base
+                    alpha = 100.0  # 1 obs → 1% cell, 99% base
                     posterior = (self.cell_counts[ck] + alpha * base) / (cell_n + alpha)
                     pred[y, x] = posterior
                 else:
