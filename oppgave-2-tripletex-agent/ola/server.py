@@ -1020,24 +1020,46 @@ def process_files(files: list) -> tuple[list[str], list[dict]]:
                 text_parts.append(f"PDF '{filename}':\n{extracted}")
             else:
                 text_parts.append(f"[PDF '{filename}' — text extraction failed, content sent as image]")
-            # Send PDF pages as PNG images for Claude vision
+            # Send PDF pages as JPEG images for Claude vision
             try:
                 import pdfplumber
                 with pdfplumber.open(io.BytesIO(data)) as pdf:
                     for i, page in enumerate(pdf.pages[:3]):
-                        img = page.to_image(resolution=150).original
-                        buf = io.BytesIO()
-                        img.save(buf, format="PNG")
-                        img_b64 = base64.b64encode(buf.getvalue()).decode()
-                        image_blocks.append({
-                            "inline_data": {"mime_type": "image/png", "data": img_b64},
-                        })
+                        try:
+                            img = page.to_image(resolution=150).original
+                            buf = io.BytesIO()
+                            # Always convert to RGB before JPEG (handles RGBA/P/LA/CMYK modes)
+                            img_rgb = img.convert("RGB") if hasattr(img, "convert") else img
+                            img_rgb.save(buf, format="JPEG", quality=85)
+                            img_data = buf.getvalue()
+                            if img_data:
+                                img_b64 = base64.b64encode(img_data).decode()
+                                image_blocks.append({
+                                    "inline_data": {"mime_type": "image/jpeg", "data": img_b64},
+                                })
+                                log.info(f"PDF page {i}: {len(img_data)} bytes as JPEG")
+                        except Exception as e_page:
+                            log.warning(f"PDF page {i} render failed: {e_page}")
                 text_parts.append(f"[PDF '{filename}' pages rendered as images — visible to you]")
             except Exception as e:
                 log.warning(f"PDF to image failed: {e}")
         elif mime.startswith("image/"):
-            image_blocks.append({"inline_data": {"mime_type": mime, "data": raw_b64}})
-            text_parts.append(f"[Image '{filename}' attached — visible to you]")
+            _valid = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+            if mime in _valid:
+                image_blocks.append({"inline_data": {"mime_type": mime, "data": raw_b64}})
+                text_parts.append(f"[Image '{filename}' attached — visible to you]")
+            else:
+                # Try converting unsupported format to JPEG
+                try:
+                    from PIL import Image as PILImage
+                    img = PILImage.open(io.BytesIO(base64.b64decode(raw_b64))).convert("RGB")
+                    buf2 = io.BytesIO()
+                    img.save(buf2, format="JPEG", quality=85)
+                    img_b64 = base64.b64encode(buf2.getvalue()).decode()
+                    image_blocks.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
+                    text_parts.append(f"[Image '{filename}' converted to JPEG — visible to you]")
+                except Exception:
+                    text_parts.append(f"[Image '{filename}' format {mime!r} not supported, skipped]")
     return text_parts, image_blocks
 
 
@@ -1129,7 +1151,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v50-agent", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v51-agent", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
@@ -1215,15 +1237,24 @@ async def _solve_inner(body, start_time):
     deadline = start_time + 250
 
     # Build message content
+    _VALID_IMG_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
     content = []
     for img in image_blocks:
         if "inline_data" in img:
+            mt = img["inline_data"].get("mime_type", "")
+            if mt not in _VALID_IMG_TYPES:
+                log.warning(f"Skipping image with invalid media_type: {mt!r}")
+                continue
+            img_data = img["inline_data"].get("data", "")
+            if not img_data:
+                log.warning(f"Skipping image with empty data (type={mt})")
+                continue
             content.append({
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": img["inline_data"]["mime_type"],
-                    "data": img["inline_data"]["data"],
+                    "media_type": mt,
+                    "data": img_data,
                 },
             })
     content.append({"type": "text", "text": user_text})
@@ -1310,7 +1341,7 @@ def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "v50-agent",
+            "version": "v51-agent",
             "model": CLAUDE_MODEL,
             "task_type": task_type,
             "prompt_fingerprint": _prompt_fingerprint(prompt),
