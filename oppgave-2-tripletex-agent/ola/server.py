@@ -134,10 +134,19 @@ CLAUDE_TOOLS = [
 ]
 
 
+_anthropic_client = None
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
 def claude_generate(system_prompt, messages, tools=None, max_tokens=2048):
     """Call Claude API with tool use support."""
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = _get_anthropic_client()
 
     kwargs = {
         "model": CLAUDE_MODEL,
@@ -166,8 +175,7 @@ def claude_generate(system_prompt, messages, tools=None, max_tokens=2048):
 
 def claude_extract(system_prompt: str, user_text: str, image_blocks: list = None, max_tokens=1024) -> str:
     """Single Claude call for data extraction. Returns raw text response."""
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = _get_anthropic_client()
 
     content = []
     if image_blocks:
@@ -307,6 +315,42 @@ def execute_tool(name: str, input_data: dict, session: requests.Session, base_ur
         body.pop("activityNumber", None)
         if "isGeneral" not in body:
             body["isGeneral"] = True
+
+    # Fix voucher postings: ensure row and date on each posting
+    if name == "tripletex_post" and "ledger/voucher" in endpoint and body:
+        voucher_date = body.get("date", date.today().isoformat())
+        for i, posting in enumerate(body.get("postings", [])):
+            if "row" not in posting:
+                posting["row"] = i + 1
+            if "date" not in posting:
+                posting["date"] = voucher_date
+
+    # Fix employee POST: ensure required fields
+    if name == "tripletex_post" and endpoint.strip("/") == "employee" and body:
+        if "dateOfBirth" not in body or not body["dateOfBirth"]:
+            body["dateOfBirth"] = "1990-01-01"
+
+    # Fix product vatType: look up correct ID from prefetched vat_types
+    if name in ("tripletex_post", "tripletex_put") and "product" in endpoint and body:
+        vt = body.get("vatType")
+        if isinstance(vt, dict) and ctx and ctx.get("vat_types"):
+            vt_id = vt.get("id")
+            # Check if this vatType ID actually exists in sandbox
+            valid_ids = {v["id"] for v in ctx["vat_types"]}
+            if vt_id not in valid_ids:
+                # Try to find matching outgoing 25% VAT type
+                for v in ctx["vat_types"]:
+                    if v.get("percentage") == 25 and "utgående" in str(v.get("name", "")).lower():
+                        body["vatType"] = {"id": v["id"]}
+                        log.info(f"Fixed vatType {vt_id} → {v['id']} ({v.get('name')})")
+                        break
+
+    # Fix order POST: ensure deliveryDate
+    if name == "tripletex_post" and endpoint.strip("/") == "order" and body:
+        if "deliveryDate" not in body:
+            body["deliveryDate"] = date.today().isoformat()
+        if "orderDate" not in body:
+            body["orderDate"] = date.today().isoformat()
 
     url = f"{base_url}/{endpoint.lstrip('/')}"
 
@@ -525,10 +569,40 @@ def format_prefetched_context(ctx: dict) -> str:
     """Format pre-fetched sandbox data for the agent. This is the agent's eyes into the sandbox."""
     parts = []
 
-    # VAT Types — critical for correct postings
+    # VAT Types — build clear summary for agent
     if ctx.get("vat_types"):
-        vt_lines = [f"  id={v['id']} number={v.get('number','')} name={v.get('name','')} pct={v.get('percentage','')}" for v in ctx["vat_types"]]
-        parts.append("VAT TYPES (use these exact IDs — never hardcode):\n" + "\n".join(vt_lines))
+        common = {}
+        for v in ctx["vat_types"]:
+            vid = v.get('id', '')
+            vname = (v.get('name') or '').lower()
+            pct = str(v.get('percentage', ''))
+            if '25' in pct and any(w in vname for w in ('utgående', 'outgoing', 'ut ')):
+                common['outgoing_25'] = vid
+            elif '25' in pct and any(w in vname for w in ('inngående', 'incoming', 'inn', 'inng')):
+                common['ingoing_25'] = vid
+            elif '15' in pct and any(w in vname for w in ('utgående', 'outgoing', 'ut ')):
+                common['outgoing_15'] = vid
+            elif '15' in pct and any(w in vname for w in ('inngående', 'incoming', 'inn', 'inng')):
+                common['ingoing_15'] = vid
+            elif pct in ('0', '0.0') and any(w in vname for w in ('fritatt', 'exempt', 'avgiftsfri')):
+                common['exempt_0'] = vid
+            elif pct in ('0', '0.0') and any(w in vname for w in ('utenfor', 'outside')):
+                common['outside_0'] = vid
+            elif pct in ('0', '0.0') and any(w in vname for w in ('ingen', 'none', 'no vat', 'no tax')):
+                common['none'] = vid
+            elif v.get('number') == 0 or vid == 0:
+                common['none'] = vid
+
+        summary = ["═══ VAT TYPE IDs (use these EXACT ids in vatType:{id:X}) ═══"]
+        if 'outgoing_25' in common: summary.append(f"  OUTGOING 25% (for products, invoices, sales): vatType:{{id:{common['outgoing_25']}}}")
+        if 'ingoing_25' in common: summary.append(f"  INGOING 25% (for supplier invoices, receipts, expenses): vatType:{{id:{common['ingoing_25']}}}")
+        if 'outgoing_15' in common: summary.append(f"  OUTGOING 15% food: vatType:{{id:{common['outgoing_15']}}}")
+        if 'ingoing_15' in common: summary.append(f"  INGOING 15% food (receipt for food): vatType:{{id:{common['ingoing_15']}}}")
+        if 'exempt_0' in common: summary.append(f"  EXEMPT 0% (purregebyr, fritatt): vatType:{{id:{common['exempt_0']}}}")
+        if 'outside_0' in common: summary.append(f"  OUTSIDE 0% (utenfor MVA): vatType:{{id:{common['outside_0']}}}")
+        if 'none' in common: summary.append(f"  NO VAT (balance postings, bank): vatType:{{id:{common['none']}}}")
+        parts.append("\n".join(summary))
+        ctx["_vat_summary"] = common
 
     # Ledger accounts
     if ctx.get("ledger_accounts"):
@@ -651,9 +725,10 @@ SUPPLIER CREATION: Always POST /customer with isSupplier:true (NOT POST /supplie
 VOUCHER FORMAT:
 POST /ledger/voucher {{date, description, postings:[
   {{account:{{id:X}}, amountGross:AMT, amountGrossCurrency:AMT, date:"YYYY-MM-DD", row:1, vatType:{{id:VT}}}},
-  {{account:{{id:Y}}, amountGross:-AMT, amountGrossCurrency:-AMT, date:"YYYY-MM-DD", row:2, vatType:{{id:0}}}}
+  {{account:{{id:Y}}, amountGross:-AMT, amountGrossCurrency:-AMT, date:"YYYY-MM-DD", row:2, vatType:{{id:NO_VAT_ID_FROM_CONTEXT}}}}
 ]}}
 Postings MUST balance to 0. row and date REQUIRED on each.
+For zero-VAT postings: use the "Ingen avgiftsbehandling" vatType ID from PRE-FETCHED DATA (never hardcode id:0!).
 Customer accounts (1500) need customer:{{id:X}}. Supplier accounts (2400) need supplier:{{id:X}}.
 
 ENDPOINTS THAT DON'T EXIST: /voucher, /journalEntry, /generalLedgerEntry, /purchaseInvoice, /timeSheet.
@@ -773,7 +848,7 @@ Use RECEIPT DATE from prompt, not today!"""
      Credit 2960 (feriepenger): holiday pay accrual (10.2% of gross, 12% if over 60)
      Credit 1920 (bank): net payment (gross - tax)
      Debit 5400 (arbeidsgiveravgift): 14.1% of gross
-     Credit 2770 (skyldig AGA): 14.1% of gross
+     Credit 2780 (skyldig AGA): 14.1% of gross
 5. After successful paySlip: PUT /:calculate → PUT /:createPayment → STOP."""
 
     elif task_type == "travel_expense":
@@ -936,18 +1011,30 @@ def process_files(files: list) -> tuple[list[str], list[dict]]:
         mime = f.get("mime_type", "")
         if mime.startswith("text") or filename.endswith((".csv", ".json", ".txt")):
             try:
-                text_parts.append(f"File '{filename}':\n{data.decode('utf-8')[:8000]}")
+                text_parts.append(f"File '{filename}':\n{data.decode('utf-8')[:16000]}")
             except UnicodeDecodeError:
                 text_parts.append(f"File '{filename}': [binary data]")
         elif mime == "application/pdf" or filename.endswith(".pdf"):
             extracted = extract_pdf_text(data)
             if extracted.strip():
                 text_parts.append(f"PDF '{filename}':\n{extracted}")
-            # Also send PDF as image so Claude can visually inspect it
-            image_blocks.append({
-                "inline_data": {"mime_type": mime or "application/pdf", "data": raw_b64},
-            })
-            text_parts.append(f"[PDF '{filename}' also attached as image for visual inspection]")
+            else:
+                text_parts.append(f"[PDF '{filename}' — text extraction failed, content sent as image]")
+            # Send PDF pages as PNG images for Claude vision
+            try:
+                import pdfplumber
+                with pdfplumber.open(io.BytesIO(data)) as pdf:
+                    for i, page in enumerate(pdf.pages[:3]):
+                        img = page.to_image(resolution=150).original
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        img_b64 = base64.b64encode(buf.getvalue()).decode()
+                        image_blocks.append({
+                            "inline_data": {"mime_type": "image/png", "data": img_b64},
+                        })
+                text_parts.append(f"[PDF '{filename}' pages rendered as images — visible to you]")
+            except Exception as e:
+                log.warning(f"PDF to image failed: {e}")
         elif mime.startswith("image/"):
             image_blocks.append({"inline_data": {"mime_type": mime, "data": raw_b64}})
             text_parts.append(f"[Image '{filename}' attached — visible to you]")
@@ -988,7 +1075,7 @@ def detect_task_type(prompt: str) -> str:
         return "receipt_voucher"
     if re.search(r'(lieferantenrechnung|supplier.invoice|factura.+proveedor|fatura.+fornecedor).*(pdf|beigefugt|attached|adjunt|anexo)', p):
         return "supplier_invoice_pdf"
-    if re.search(r'lonn|lon\b|payroll|nomina|gehalt|salario|salary', p):
+    if re.search(r'lonn|lon\b|payroll|nomina|gehalt|salario|salary|folha.de.pagamento', p):
         if not re.search(r'monatsabschluss|manedsavslut|manadsavslut|manavslutn|month.end|arsoppgjor|year.end|cloture|encerramento|cierre|ruckstellung|avsetjing|avsetting|accrual|periodiser|contrato.*trabalh|contrato.*trabaj|arbeidskontrakt|employment.contract|arbeitsvertrag|contrat.de.travail|offer.letter|lettre.d.offre|tilbudsbrev|onboarding|pdf.anexo|pdf.ci.joint|vedlagt.pdf|attached.pdf', p):
             return "salary"
     if re.search(r'inv-\d+', p):
@@ -1013,17 +1100,17 @@ def detect_task_type(prompt: str) -> str:
         return "departments"
     if re.search(r'opprett.*prosjekt|create.*project|crie.*projeto|crea.*proyecto|erstellen.*projekt|creez.*projet', p):
         return "project"
-    if re.search(r'opprett.*ordre|create.*order|crie.*commande|cria.*pedido|erstellen.*auftrag|creez.*commande', p):
+    if re.search(r'opprett.*ordre|create.*order|crie.*commande|crie.*encomenda|cria.*pedido|erstellen.*auftrag|creez.*commande', p):
         return "order"
     if re.search(r'tre.*produktlinj|three.*product.line|tres.*linha|tres.*linea|drei.*produkt|trois.*ligne|com tres.*produto|con tres.*producto|mit drei.*produkt|avec trois.*produit|with three.*product', p):
         return "invoice_multi"
     if re.search(r'opprett.*send.*faktura|create.*send.*invoice|crie.*envie|crea.*env.*factura|erstellen.*senden.*rechnung|creez.*envoyez', p):
         return "invoice_send"
-    if re.search(r'ny.*ansatt|new.*employee.*born|novo.*funcion|nuevo.*empleado|neuen.*mitarbeiter|nouvel.*employe|ny.*tilsett|nouveau.*employe|nova.*funcion', p):
+    if re.search(r'ny.*ansatt|opprett.*ansatt|new.*employee|novo.*funcion|nuevo.*empleado|neuen.*mitarbeiter|nouvel.*employe|ny.*tilsett|nouveau.*employe|nova.*funcion|crie.*empregado|crear.*empleado|erstellen.*mitarbeiter', p):
         return "employee"
     if re.search(r'registr.*leverand|regist.*liefer|regist.*fornecedor|regist.*proveedor|enregistr.*fournisseur', p):
         return "supplier"
-    if re.search(r'opprett.*produkt|create.*product|cr[ée][ez].*produi[ts]|crea.*producto|erstellen.*produkt|enregistr.*produit', p):
+    if re.search(r'opprett.*produkt|create.*product|cr[ée][ez].*produi[ts]|crie.*produto|crea.*producto|erstellen.*produkt|enregistr.*produit', p):
         return "product"
     if re.search(r'opprett.*kunde|create.*customer|crie.*cliente|crea.*cliente|erstellen.*kund|creez.*client|enregistr.*client', p):
         return "customer"
@@ -1163,9 +1250,12 @@ async def _solve_inner(body, start_time):
             break
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
+        text_blocks = [b.text for b in response.content if hasattr(b, 'text')]
+        if text_blocks:
+            log.info(f"Claude text: {' '.join(text_blocks)[:500]}")
 
         if not tool_uses:
-            log.info(f"Agent finished at iteration {iteration}")
+            log.info(f"Agent finished at iteration {iteration} (stop_reason={response.stop_reason})")
             break
 
         messages.append({"role": "assistant", "content": response.content})
@@ -1176,7 +1266,12 @@ async def _solve_inner(body, start_time):
             def run_tool(tu):
                 log.info(f"Tool: {tu.name}({json.dumps(tu.input, ensure_ascii=False)[:800]})")
                 result = execute_tool(tu.name, tu.input, session, base_url, trace, ctx)
-                return {"type": "tool_result", "tool_use_id": tu.id, "content": str(result)}
+                result_str = str(result)
+                remaining_time = deadline - time.time()
+                remaining_iters = max_iterations - iteration - 1
+                if remaining_time < 60 or remaining_iters <= 3:
+                    result_str += f"\n[URGENT: {remaining_time:.0f}s and {remaining_iters} iterations left. Finish NOW.]"
+                return {"type": "tool_result", "tool_use_id": tu.id, "content": result_str}
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
                 tool_results = list(ex.map(run_tool, tool_uses))
         else:
