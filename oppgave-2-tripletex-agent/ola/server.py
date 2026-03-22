@@ -873,14 +873,31 @@ GET /travelExpense → if APPROVED: PUT /travelExpense/ID/:unapprove → DELETE 
 
     elif task_type == "ledger_audit":
         return """═══ LEDGER AUDIT ═══
-The prompt TELLS you the errors. You do NOT need to find them — go straight to corrections.
-For each error: POST /ledger/voucher with corrective postings:
-  Wrong account: debit correct, credit wrong (reverse the error)
-  Duplicate: reverse it (swap signs)
-  Missing VAT: debit expense with ingoing VAT type (auto-splits), credit same amount vatType:0
-  Wrong amount: reverse wrong, post correct
-Look up any account IDs you need via GET /ledger/account?number=XXXX.
-Each correction = separate voucher with description: "Korreksjon: [reason]" """
+The prompt TELLS you ALL errors. Read them carefully. Create ONE correction voucher PER error.
+Look up account IDs via GET /ledger/account?number=XXXX (use the account numbers from the error descriptions).
+
+ERROR TYPES AND HOW TO CORRECT:
+
+1. WRONG ACCOUNT (posted to 6540 instead of 6860, amount 4800 NOK):
+   Voucher: debit 6860 (correct) +4800, credit 6540 (wrong) -4800, vatType=NO_VAT on BOTH.
+   (This reverses the debit from wrong account and re-debits the correct one)
+
+2. DUPLICATE VOUCHER (account 6500, amount 1050 NOK — it was posted twice):
+   Voucher: credit 6500 -1050 (removes one), debit 1920 +1050 (or whatever the original credit was).
+   Look at the original voucher to see the other side, then reverse ALL postings of the duplicate.
+
+3. MISSING VAT LINE (account 7000, amount excl. 6750 NOK, VAT missing on 2710):
+   Voucher: debit 7000 +MVA_AMOUNT (with ingoing 25% vatType — auto-splits), credit 1920 +TOTAL_INCL_VAT, vatType:NO_VAT
+   Actually: the original was posted without VAT. To correct: create a VAT-only correction:
+   debit 2710 (input VAT) by the VAT amount = excl × 0.25, credit 7000 (same expense) by VAT amount, vatType:NO_VAT on both.
+
+4. WRONG AMOUNT (6500, posted 15700 instead of 8100):
+   Step 1: reverse wrong: credit 6500 -15700, debit 1920 +15700 (or creditor side).
+   Step 2: post correct: debit 6500 +8100, credit 1920 -8100.
+   OR combine: debit 6500 +(8100-15700)=-7600 (net correction), debit 1920 +7600, vatType:NO_VAT.
+
+IMPORTANT: Use account IDs from LEDGER ACCOUNT IDS in context. For accounts NOT in context: GET /ledger/account?number=XXXX.
+Each voucher: date=original date if known, else today. description="Korreksjon: [what the error was]" """
 
     elif task_type == "year_end":
         return f"""═══ YEAR-END CLOSING ═══
@@ -940,11 +957,16 @@ Full cycle: employees → customer → project → hours → supplier cost → c
     elif task_type == "cost_analysis":
         return f"""═══ COST ANALYSIS ═══
 1. GET /ledger/posting?dateFrom=2026-01-01&dateTo=2026-01-31&fields=id,amount,account(number,name)&count=1000
-2. GET /ledger/posting?dateFrom=2026-02-01&dateTo=2026-02-28&fields=...&count=1000
-3. Group by account, sum per month, find 3 accounts with largest increase
-4. Make employee EXTENDED + entitlements (45+10, customer:{{id:{company_id or 'COMPANY'}}})
-5. For each of 3 accounts: POST /project + POST /activity {{name, activityType:"GENERAL_ACTIVITY", isGeneral:true}}
-   CRITICAL: activityType is REQUIRED!"""
+   GET /ledger/posting?dateFrom=2026-02-01&dateTo=2026-02-28&fields=id,amount,account(number,name)&count=1000
+   (Do both in one response)
+2. Group postings by account number. Sum amounts per month. Find 3 accounts with LARGEST ABSOLUTE INCREASE (Feb_sum - Jan_sum).
+   Use the ACCOUNT NAME from the posting as the project name.
+3. Make employee EXTENDED + entitlements (45+10, customer:{{id:{company_id or 'COMPANY'}}})
+4. For EACH of the 3 accounts — do project + activity in ONE response:
+   POST /project {{name:"ACCOUNT_NAME", startDate:"{today}", projectManager:{{id:EMPLOYEE_ID}}}}
+   POST /activity {{name:"ACCOUNT_NAME", activityType:"GENERAL_ACTIVITY", isGeneral:true}}
+   (activityType is REQUIRED)
+5. After creating all 3 project+activity pairs, STOP. Do not post timesheets or invoices."""
 
     elif task_type == "acct_dimension":
         return f"""═══ ACCOUNTING DIMENSIONS ═══
@@ -1151,7 +1173,7 @@ COMPLEX_TASKS = {"supplier_invoice_pdf", "year_end", "bank_recon", "ledger_audit
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v51-agent", "model": CLAUDE_MODEL}
+    return {"status": "ok", "version": "v52-agent", "model": CLAUDE_MODEL}
 
 
 @app.post("/solve")
@@ -1341,7 +1363,7 @@ def _log_run(prompt, files, trace, elapsed, task_type="unknown"):
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "v51-agent",
+            "version": "v52-agent",
             "model": CLAUDE_MODEL,
             "task_type": task_type,
             "prompt_fingerprint": _prompt_fingerprint(prompt),
